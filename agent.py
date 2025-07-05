@@ -1,11 +1,12 @@
 from dotenv import load_dotenv
 
 from livekit import agents
-from livekit.agents import AgentSession, Agent
+from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import (
     openai,
     google,
     silero,
+    noise_cancellation,
 )
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 import datetime
@@ -77,7 +78,13 @@ async def entrypoint(ctx: agents.JobContext):
 
     await session.start(
         room=ctx.room,
-        agent=Assistant(context_vars=context_variables)  # Pass context variables here
+        agent=Assistant(context_vars=context_variables),  # Pass context variables here
+        room_input_options=RoomInputOptions(
+            # LiveKit Cloud enhanced noise cancellation
+            # - If self-hosting, omit this parameter
+            # - For telephony applications, use `BVCTelephony` for best results
+            noise_cancellation=noise_cancellation.BVC(), 
+        ),
     )
 
 
