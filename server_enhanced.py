@@ -302,6 +302,40 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(user_router, prefix="/users")
 app.include_router(agents_router, prefix="/agents")
 
+# Session manager endpoints
+from services.auth_service import get_current_user
+from models.user import User
+from fastapi import Depends
+
+@app.get("/session-manager/stats")
+async def get_session_manager_stats(current_user: User = Depends(get_current_user)):
+    """Get session manager statistics"""
+    return {
+        "session_manager": {
+            "total_sessions": connection_manager.metrics.total_connections,
+            "active_sessions": connection_manager.metrics.active_connections,
+            "peak_sessions": connection_manager.metrics.peak_connections,
+            "avg_session_duration": connection_manager.metrics.avg_session_duration
+        },
+        "active_connections": connection_manager.metrics.active_connections,
+        "server_capacity": connection_manager.max_connections,
+        "capacity_usage": f"{(connection_manager.metrics.active_connections / connection_manager.max_connections) * 100:.1f}%"
+    }
+
+@app.get("/session-manager/sessions")
+async def get_sessions(current_user: User = Depends(get_current_user)):
+    """Get current sessions"""
+    sessions = []
+    for client_id, connection_info in connection_manager.connections.items():
+        sessions.append({
+            "session_id": client_id,
+            "connected_at": connection_info.connected_at,
+            "last_activity": connection_info.last_activity,
+            "duration": time.time() - connection_info.connected_at,
+            "ip_address": connection_info.ip_address
+        })
+    return sessions
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Enhanced WebSocket endpoint with connection management"""
@@ -460,9 +494,18 @@ async def get_metrics():
 async def root():
     """Root endpoint"""
     return {
-        "message": "Voice Agent Server",
+        "service": "Voice Agent Server",
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
+        "message": "Voice Agent Server",
+        "features": [
+            "authentication",
+            "user_management",
+            "agent_management",
+            "voice_processing",
+            "websocket_support",
+            "multi_agent_conversations"
+        ]
     }
 
 async def main():
