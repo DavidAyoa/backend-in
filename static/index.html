@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipecat Voice Agent</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.connected { background-color: #d4edda; color: #155724; }
+        .status.disconnected { background-color: #f8d7da; color: #721c24; }
+        .status.connecting { background-color: #fff3cd; color: #856404; }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { 
+            background-color: #6c757d; 
+            cursor: not-allowed; 
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .transcript {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 8px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            text-align: right;
+        }
+        .bot-message {
+            background-color: #f1f8e9;
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Pipecat Voice Agent</h1>
+        
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <div class="controls">
+            <button id="connectBtn" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+            <button id="startRecordingBtn" onclick="startRecording()" disabled>Start Recording</button>
+            <button id="stopRecordingBtn" onclick="stopRecording()" disabled>Stop Recording</button>
+        </div>
+        
+        <div class="transcript" id="transcript">
+            <p><em>Conversation will appear here...</em></p>
+        </div>
+        
+        <div id="error" class="error" style="display: none;"></div>
+    </div>
+
+    <script src="js/client.js"></script>
+</body>
+</html>
