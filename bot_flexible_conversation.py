@@ -170,7 +170,6 @@ class ModeAwareFrameProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
         
         # Always pass through StartFrame and EndFrame without checking
-        from pipecat.frames.frames import StartFrame, EndFrame
         if isinstance(frame, (StartFrame, EndFrame)):
             await self.push_frame(frame, direction)
             return
@@ -198,7 +197,6 @@ class ModeAwareFrameProcessor(FrameProcessor):
             if mode.has_text_input:
                 # Convert TextFrame to TranscriptionFrame to trigger LLM processing
                 slog.debug("Converting text input to transcription", session_id=self.session_id, text=frame.text)
-                from pipecat.frames.frames import TranscriptionFrame
                 transcript_frame = TranscriptionFrame(
                     text=frame.text,
                     user_id="user",
@@ -221,7 +219,6 @@ class ModeAwareFrameProcessor(FrameProcessor):
                 await self._send_text_response(frame)
             
         # Handle transcript frames
-        from pipecat.frames.frames import TranscriptionFrame
         if isinstance(frame, TranscriptionFrame):
             if mode.has_text_output:
                 # Send transcript to client if text output is enabled

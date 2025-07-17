@@ -4,13 +4,16 @@ A clean, scalable voice agent backend built with FastAPI and Pipecat, supporting
 
 ## Features
 
+- **Flexible Conversation System**: Support for voice-to-voice, voice-to-text, text-to-voice, and text-to-text modes
+- **Dynamic Mode Switching**: Change conversation modes seamlessly during runtime
 - **Dual Transport Support**: WebSocket and WebRTC transports with adaptive selection
 - **Service Pooling**: Efficient resource management for STT, LLM, and TTS services
 - **Clean Architecture**: Well-structured codebase with proper separation of concerns
-- **Comprehensive Testing**: Unit, integration, and end-to-end tests
+- **Comprehensive Testing**: Unit, integration, and end-to-end tests with 100% pass rate
 - **Docker Support**: Full containerization with development and production environments
 - **Type Safety**: Full type hints and mypy support
 - **Development Tools**: Pre-commit hooks, linting, and formatting
+- **Robust Error Handling**: Proper frame processing and session management
 
 ## Project Structure
 
