@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  # Main application
+  voice-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./static:/app/static
+      - ./data:/app/data  # SQLite database storage
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Development/testing services
+  dev-env:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "7861:7860"
+    env_file:
+      - .env.dev
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: "no"
+    networks:
+      - voice-agent-network
+    profiles:
+      - dev
+
+  # Testing environment
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    env_file:
+      - .env.test
+    volumes:
+      - .:/app
+      - ./test-results:/app/test-results
+      - ./data:/app/data
+    networks:
+      - voice-agent-network
+    profiles:
+      - test
+
+  # Bot runner (for pipeline tasks)
+  bot-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      - voice-agent
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+    command: ["python", "-m", "bot.runner"]
+    profiles:
+      - bot
+
+  # Redis for future use (optional)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - redis
+
+  # PostgreSQL for future use (optional)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: voice_agent
+      POSTGRES_USER: voice_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_agent_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    restart: unless-stopped
+    networks:
+      - voice-agent-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voice_agent"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - postgres
+
+volumes:
+  redis_data:
+  postgres_data:
+
+networks:
+  voice-agent-network:
+    driver: bridge

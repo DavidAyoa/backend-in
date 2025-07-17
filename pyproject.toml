@@ -24,7 +24,7 @@ dependencies = [
     # Logging
     "structlog>=25.4.0",
     # Voice processing (Pipecat)
-    "pipecat-ai[google,openai,silero]>=0.0.75",
+    "pipecat-ai[google,openai,silero,webrtc]>=0.0.75",
     # WebSocket & HTTP
     "websockets>=13.1",
     "httpx>=0.25.0",

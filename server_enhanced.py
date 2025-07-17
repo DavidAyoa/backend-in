@@ -201,13 +201,18 @@ class ConnectionManager:
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get current server metrics"""
+        # Calculate capacity usage with safe division
+        capacity_pct = 0.0
+        if self.max_connections > 0:
+            capacity_pct = (self.metrics.active_connections / self.max_connections) * 100
+        
         return {
             "connections": {
                 "total": self.metrics.total_connections,
                 "active": self.metrics.active_connections,
                 "peak": self.metrics.peak_connections,
                 "rejected": self.metrics.rejected_connections,
-                "capacity_used": f"{(self.metrics.active_connections / self.max_connections) * 100:.1f}%"
+                "capacity_used": f"{capacity_pct:.1f}%"
             },
             "performance": {
                 "avg_session_duration": f"{self.metrics.avg_session_duration:.2f}s",
@@ -230,8 +235,9 @@ from routers.auth import router as auth_router, user_router
 # Import agents router  
 from routers.agents import router as agents_router
 
-# Import dual-mode bot
-from bot_dual_mode import run_dual_mode_bot, ConversationMode
+
+# Import flexible conversation bot
+from bot_flexible_conversation import flexible_bot, ConversationMode as FlexibleConversationMode
 
 # Pydantic models for chat
 class TextChatRequest(BaseModel):
@@ -319,7 +325,7 @@ async def get_session_manager_stats(current_user: User = Depends(get_current_use
         },
         "active_connections": connection_manager.metrics.active_connections,
         "server_capacity": connection_manager.max_connections,
-        "capacity_usage": f"{(connection_manager.metrics.active_connections / connection_manager.max_connections) * 100:.1f}%"
+        "capacity_usage": f"{(connection_manager.metrics.active_connections / connection_manager.max_connections) * 100:.1f}%" if connection_manager.max_connections > 0 else "0.0%"
     }
 
 @app.get("/session-manager/sessions")
@@ -347,16 +353,19 @@ async def websocket_endpoint(websocket: WebSocket):
     # Run bot with management
     await run_bot_with_management(websocket, client_id)
 
-@app.websocket("/ws/dual-mode")
-async def dual_mode_websocket_endpoint(
+
+@app.websocket("/ws/flexible")
+async def flexible_websocket_endpoint(
     websocket: WebSocket,
     token: Optional[str] = None,
     agent_id: Optional[int] = None,
-    mode: str = "voice",
-    return_voice: bool = True,
-    return_transcript: bool = True
+    voice_input: bool = True,
+    text_input: bool = True,
+    voice_output: bool = True,
+    text_output: bool = True,
+    enable_interruptions: bool = True
 ):
-    """Dual-mode WebSocket endpoint with voice/text switching"""
+    """Flexible WebSocket endpoint with full conversation mode control"""
     client_id = await connection_manager.connect(websocket)
     
     if client_id is None:
@@ -366,22 +375,32 @@ async def dual_mode_websocket_endpoint(
     
     try:
         # Configure initial mode
-        initial_mode = ConversationMode(
-            mode=mode,
-            return_voice=return_voice,
-            return_transcript=return_transcript,
-            enable_interruptions=mode == "voice"
+        initial_mode = FlexibleConversationMode(
+            voice_input=voice_input,
+            text_input=text_input,
+            voice_output=voice_output,
+            text_output=text_output,
+            enable_interruptions=enable_interruptions
         )
         
-        # Run dual-mode bot
-        await run_dual_mode_bot(
-            websocket, 
+        # Validate mode
+        if not initial_mode.validate():
+            await websocket.close(code=1008, reason="Invalid mode configuration")
+            return
+        
+        # Update activity
+        connection_manager.update_activity(client_id)
+        
+        # Run flexible conversation bot
+        await flexible_bot.create_session(
+            websocket,
             session_id=client_id,
             agent_id=agent_id,
             initial_mode=initial_mode
         )
+        
     except Exception as e:
-        logger.error("Dual-mode WebSocket error", client_id=client_id, error=str(e))
+        logger.error("Flexible WebSocket error", client_id=client_id, error=str(e))
     finally:
         await connection_manager.disconnect(client_id)
 
@@ -467,7 +486,10 @@ async def health_check():
     metrics = connection_manager.get_metrics()
     
     # Determine health status
-    capacity_used = metrics["connections"]["active"] / connection_manager.max_connections
+    capacity_used = 0.0
+    if connection_manager.max_connections > 0:
+        capacity_used = metrics["connections"]["active"] / connection_manager.max_connections
+    
     if capacity_used >= 0.9:
         status = "warning"
     elif capacity_used >= 1.0:
@@ -504,7 +526,8 @@ async def root():
             "agent_management",
             "voice_processing",
             "websocket_support",
-            "multi_agent_conversations"
+            "multi_agent_conversations",
+            "flexible_conversation_modes"
         ]
     }
 

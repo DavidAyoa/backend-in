@@ -1,0 +1,108 @@
+Pipeline
+
+Pipeline Heartbeats
+===================
+
+Monitor pipeline health with heartbeat frames
+
+[​
+
+](#overview)
+
+Overview
+----------------------------
+
+Pipeline heartbeats provide a way to monitor the health of your pipeline by sending periodic heartbeat frames through the system. When enabled, the pipeline will send heartbeat frames every second and monitor their progress through the pipeline.
+
+[​
+
+](#enabling-heartbeats)
+
+Enabling Heartbeats
+--------------------------------------------------
+
+Heartbeats can be enabled by setting `enable_heartbeats` to `True` in the `PipelineParams`:
+
+Copy
+
+Ask AI
+
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+    
+    pipeline = Pipeline([...])
+    params = params=PipelineParams(enable_heartbeats=True)
+    task = PipelineTask(pipeline, params)
+    
+
+[​
+
+](#how-it-works)
+
+How It Works
+------------------------------------
+
+When heartbeats are enabled:
+
+1.  The pipeline sends a `HeartbeatFrame` every second
+2.  The frame traverses through all processors in the pipeline, from source to sink
+3.  The pipeline monitors how long it takes for heartbeat frames to complete their journey
+4.  If a heartbeat frame isn’t received within 5 seconds, a warning is logged
+
+[​
+
+](#monitoring-output)
+
+Monitoring Output
+----------------------------------------------
+
+The system will log:
+
+*   Trace-level logs showing heartbeat processing time
+*   Warning messages if heartbeats aren’t received within the monitoring window
+
+Example warning message:
+
+Copy
+
+Ask AI
+
+    WARNING    PipelineTask#1: heartbeat frame not received for more than 5.0 seconds
+    
+
+[​
+
+](#use-cases)
+
+Use Cases
+------------------------------
+
+Heartbeat monitoring is useful for:
+
+*   Detecting pipeline stalls or blockages
+*   Monitoring processing latency through the pipeline
+*   Identifying performance issues in specific processors
+*   Ensuring the pipeline remains responsive
+
+[​
+
+](#configuration)
+
+Configuration
+--------------------------------------
+
+The heartbeat system uses two key timing constants:
+
+*   `HEARTBEAT_SECONDS = 1.0` - Interval between heartbeat frames
+*   `HEARTBEAT_MONITOR_SECONDS = 10.0` - Time before warning if no heartbeat received
+
+These values are currently fixed but may be configurable in future versions.
+
+Assistant
+
+Responses are generated using AI and may contain mistakes.
+
+[Pipeline Idle Detection](/server/pipeline/pipeline-idle-detection)[ParallelPipeline](/server/pipeline/parallel-pipeline)
+
+[x](https://x.com/pipecat_ai)[github](https://github.com/pipecat-ai/pipecat)[discord](https://discord.gg/pipecat)
+
+[Powered by Mintlify](https://mintlify.com/preview-request?utm_campaign=poweredBy&utm_medium=referral&utm_source=daily)
