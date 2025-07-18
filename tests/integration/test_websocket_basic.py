@@ -6,10 +6,15 @@ Isolates WebSocket connection issues without pipeline complexity
 
 import asyncio
 import json
+import pytest
 import websockets
 import requests
 from urllib.parse import urlencode
 
+# Configure pytest for async testing
+pytest_plugins = ('pytest_asyncio',)
+
+@pytest.mark.asyncio
 async def test_basic_websocket_connection():
     """Test basic WebSocket connection without sending data"""
     
@@ -63,6 +68,7 @@ async def test_basic_websocket_connection():
         print(f"❌ WebSocket connection failed: {e}")
         return False
 
+@pytest.mark.asyncio
 async def test_multiple_connections():
     """Test multiple consecutive connections"""
     print("\n🔄 Testing multiple consecutive connections...")

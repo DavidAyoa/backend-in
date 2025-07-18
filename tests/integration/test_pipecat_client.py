@@ -5,9 +5,13 @@ Uses Pipecat's own WebSocket client transport for proper testing
 """
 
 import asyncio
+import pytest
 import requests
 from urllib.parse import urlencode
 from typing import Optional
+
+# Configure pytest for async testing
+pytest_plugins = ('pytest_asyncio',)
 
 from pipecat.frames.frames import (
     InputAudioRawFrame, 
@@ -50,9 +54,20 @@ class TestFrameProcessor(FrameProcessor):
         self.responses.append(frame)
         await self.push_frame(frame, direction)
 
-async def test_websocket_client_connection(mode_params: dict, test_name: str) -> bool:
+@pytest.fixture
+def mode_params():
+    """Default mode parameters for testing"""
+    return {
+        'voice_input': 'true',
+        'text_input': 'true', 
+        'voice_output': 'true',
+        'text_output': 'true'
+    }
+
+@pytest.mark.asyncio
+async def test_websocket_client_connection(mode_params, test_name):
     """Test WebSocket connection with specific mode"""
-    print(f"\n🧪 Testing {test_name}")
+    print(f"\n🧪 Testing WebSocket Connection")
     
     # Build WebSocket URL
     ws_url = f"ws://localhost:7860/ws/flexible?{urlencode(mode_params)}"
@@ -165,6 +180,7 @@ async def test_websocket_client_connection(mode_params: dict, test_name: str) ->
             except asyncio.CancelledError:
                 pass
 
+@pytest.mark.asyncio
 async def test_simple_connection():
     """Test simple connection without full pipeline"""
     print("\n🔍 Testing Simple Connection")

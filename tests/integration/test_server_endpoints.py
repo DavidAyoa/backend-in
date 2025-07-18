@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from fastapi.websockets import WebSocket
 
 # Import the server module
-from server_enhanced import app, connection_manager, FlexibleConversationMode
+from server import app, connection_manager, FlexibleConversationMode
 
 # Configure pytest for async testing
 pytest_plugins = ('pytest_asyncio',)
@@ -107,13 +107,13 @@ class TestWebSocketEndpoints:
     @pytest.mark.asyncio
     async def test_flexible_websocket_endpoint_valid_mode(self, mock_websocket):
         """Test flexible WebSocket endpoint with valid mode"""
-        from server_enhanced import flexible_websocket_endpoint
+        from server import flexible_websocket_endpoint
         
-        with patch('server_enhanced.connection_manager') as mock_conn_manager:
+        with patch('server.connection_manager') as mock_conn_manager:
             mock_conn_manager.connect = AsyncMock(return_value="test-client-id")
             mock_conn_manager.disconnect = AsyncMock()
             
-            with patch('server_enhanced.flexible_bot') as mock_bot:
+            with patch('server.flexible_bot') as mock_bot:
                 mock_bot.create_session = AsyncMock()
                 
                 # Test valid mode configuration
@@ -146,9 +146,9 @@ class TestWebSocketEndpoints:
     @pytest.mark.asyncio
     async def test_flexible_websocket_endpoint_invalid_mode(self, mock_websocket):
         """Test flexible WebSocket endpoint with invalid mode"""
-        from server_enhanced import flexible_websocket_endpoint
+        from server import flexible_websocket_endpoint
         
-        with patch('server_enhanced.connection_manager') as mock_conn_manager:
+        with patch('server.connection_manager') as mock_conn_manager:
             mock_conn_manager.connect = AsyncMock(return_value="test-client-id")
             mock_conn_manager.disconnect = AsyncMock()
             
@@ -173,9 +173,9 @@ class TestWebSocketEndpoints:
     @pytest.mark.asyncio
     async def test_flexible_websocket_endpoint_server_full(self, mock_websocket):
         """Test flexible WebSocket endpoint when server is at capacity"""
-        from server_enhanced import flexible_websocket_endpoint
+        from server import flexible_websocket_endpoint
         
-        with patch('server_enhanced.connection_manager') as mock_conn_manager:
+        with patch('server.connection_manager') as mock_conn_manager:
             # Simulate server at capacity
             mock_conn_manager.connect = AsyncMock(return_value=None)
             
@@ -201,7 +201,7 @@ class TestConnectionManager:
     @pytest.fixture
     def manager(self):
         """Create a fresh connection manager for testing"""
-        from server_enhanced import ConnectionManager
+        from server import ConnectionManager
         return ConnectionManager()
     
     @pytest.mark.asyncio

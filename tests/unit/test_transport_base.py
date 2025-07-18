@@ -5,7 +5,7 @@ Unit tests for transport base classes and configurations
 
 import pytest
 from unittest.mock import patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timezone
 
 from transports.base import (
     TransportType, 
@@ -308,7 +308,7 @@ class TestBaseTransportManager:
             await transport_manager.create_session(session_id)
         
         # Manually set old timestamps for some sessions
-        old_time = datetime.utcnow().replace(year=2020)  # Very old timestamp
+        old_time = datetime.now(timezone.utc).replace(year=2020)  # Very old timestamp
         transport_manager.active_sessions["session1"].last_activity = old_time
         transport_manager.active_sessions["session2"].last_activity = old_time
         

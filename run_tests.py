@@ -64,8 +64,8 @@ def run_tests_with_coverage():
         "uv", "run", "pytest", 
         "test_flexible_conversation.py",
         "test_server_endpoints.py",
-        "--cov=bot_flexible_conversation",
-        "--cov=server_enhanced",
+        "--cov=bot.flexible_conversation",
+        "--cov=server",
         "--cov-report=term-missing",
         "--cov-report=html",
         "-v"
@@ -137,8 +137,8 @@ def lint_code():
     # Run flake8
     success &= run_command([
         sys.executable, "-m", "flake8", 
-        "bot_flexible_conversation.py",
-        "server_enhanced.py",
+        "bot/flexible_conversation.py",
+        "server.py",
         "test_flexible_conversation.py",
         "test_server_endpoints.py",
         "--max-line-length=100",
@@ -151,8 +151,8 @@ def format_code():
     """Format code with black"""
     return run_command([
         sys.executable, "-m", "black", 
-        "bot_flexible_conversation.py",
-        "server_enhanced.py",
+        "bot/flexible_conversation.py",
+        "server.py",
         "test_flexible_conversation.py",
         "test_server_endpoints.py"
     ], "Formatting code with black")

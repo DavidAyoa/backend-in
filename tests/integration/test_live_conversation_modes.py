@@ -2,6 +2,9 @@
 """
 Live test for conversation modes against running server
 Tests actual audio and text processing with real WebSocket connections
+
+NOTE: These tests require a running server on localhost:7860
+Run the server first with: python main.py
 """
 
 import asyncio
@@ -10,8 +13,71 @@ import json
 import base64
 import numpy as np
 import time
+import struct
+import math
 from typing import Dict, Any, Optional
 import requests
+import pytest
+from urllib.parse import urlencode
+
+# Pipecat imports for proper frame handling
+from pipecat.frames.frames import (
+    InputAudioRawFrame, 
+    TextFrame, 
+    TransportMessageFrame,
+    StartFrame,
+    EndFrame
+)
+from pipecat.transports.network.websocket_client import (
+    WebsocketClientTransport,
+    WebsocketClientParams,
+    WebsocketClientCallbacks
+)
+from pipecat.serializers.protobuf import ProtobufFrameSerializer
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineTask, PipelineParams
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+
+# Mark all tests in this module as integration tests
+pytestmark = pytest.mark.integration
+
+class TestFrameProcessor(FrameProcessor):
+    """Simple processor to handle responses from the server"""
+    
+    def __init__(self):
+        super().__init__()
+        self.responses = []
+        self.response_event = asyncio.Event()
+    
+    async def process_frame(self, frame, direction: FrameDirection):
+        """Log received frames"""
+        await super().process_frame(frame, direction)
+        
+        print(f"📨 Received frame: {type(frame).__name__}")
+        if hasattr(frame, 'text') and frame.text:
+            print(f"   Text: {frame.text}")
+        elif hasattr(frame, 'message') and frame.message:
+            print(f"   Message: {frame.message}")
+        elif hasattr(frame, 'audio') and frame.audio:
+            print(f"   Audio: {len(frame.audio)} bytes")
+            
+        self.responses.append(frame)
+        self.response_event.set()
+        await self.push_frame(frame, direction)
+    
+    async def wait_for_response(self, timeout=10.0):
+        """Wait for a response frame"""
+        try:
+            await asyncio.wait_for(self.response_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+    
+    def clear_responses(self):
+        """Clear responses and reset event"""
+        self.responses.clear()
+        self.response_event.clear()
 
 class LiveConversationTester:
     """Test conversation modes against live server"""
@@ -65,7 +131,7 @@ class LiveConversationTester:
                 # Send audio data
                 audio_message = {
                     "type": "audio_input",
-                    "data": encoded_audio,
+                    "bytes": encoded_audio,
                     "format": "pcm_16",
                     "sample_rate": 16000,
                     "channels": 1
@@ -155,7 +221,7 @@ class LiveConversationTester:
                 # Send audio data
                 audio_message = {
                     "type": "audio_input",
-                    "data": encoded_audio,
+                    "bytes": encoded_audio,
                     "format": "pcm_16",
                     "sample_rate": 16000,
                     "channels": 1
@@ -247,7 +313,7 @@ class LiveConversationTester:
                 # Send audio first
                 audio_message = {
                     "type": "audio_input",
-                    "data": encoded_audio,
+                    "bytes": encoded_audio,
                     "format": "pcm_16",
                     "sample_rate": 16000,
                     "channels": 1
@@ -363,8 +429,73 @@ class LiveConversationTester:
             print("⚠️  Some conversation modes may need attention.")
 
 
+# Pytest fixtures
+@pytest.fixture
+def tester():
+    """Create a LiveConversationTester instance"""
+    return LiveConversationTester(server_port=7860)
+
+@pytest.fixture
+async def server_running(tester):
+    """Check if server is running and skip tests if not"""
+    if not await tester.test_server_health():
+        pytest.skip("Server is not running. Start server with: python main.py")
+    return True
+
+# Alternative simpler approach - check server health in each test
+async def check_server_health():
+    """Simple server health check function"""
+    tester = LiveConversationTester()
+    if not await tester.test_server_health():
+        pytest.skip("Server is not running. Start server with: python main.py")
+    return True
+
+# Individual pytest test functions
+@pytest.mark.asyncio
+async def test_voice_to_voice_conversation_mode(tester):
+    """Test voice-to-voice conversation mode"""
+    await check_server_health()
+    result = await tester.test_voice_to_voice_mode()
+    assert result is True, "Voice-to-Voice mode should work correctly"
+
+@pytest.mark.asyncio
+async def test_text_to_text_conversation_mode(tester):
+    """Test text-to-text conversation mode"""
+    await check_server_health()
+    result = await tester.test_text_to_text_mode()
+    assert result is True, "Text-to-Text mode should work correctly"
+
+@pytest.mark.asyncio
+async def test_voice_to_text_conversation_mode(tester):
+    """Test voice-to-text conversation mode"""
+    await check_server_health()
+    result = await tester.test_voice_to_text_mode()
+    assert result is True, "Voice-to-Text mode should work correctly"
+
+@pytest.mark.asyncio
+async def test_text_to_voice_conversation_mode(tester):
+    """Test text-to-voice conversation mode"""
+    await check_server_health()
+    result = await tester.test_text_to_voice_mode()
+    assert result is True, "Text-to-Voice mode should work correctly"
+
+@pytest.mark.asyncio
+async def test_multimodal_conversation_mode(tester):
+    """Test multimodal conversation mode"""
+    await check_server_health()
+    result = await tester.test_multimodal_mode()
+    assert result is True, "Multimodal mode should work correctly"
+
+@pytest.mark.asyncio
+async def test_invalid_conversation_mode(tester):
+    """Test invalid conversation mode configuration"""
+    await check_server_health()
+    result = await tester.test_invalid_mode()
+    assert result is True, "Invalid mode should be properly rejected"
+
+# Legacy main function for standalone execution
 async def main():
-    """Main test runner"""
+    """Main test runner for standalone execution"""
     tester = LiveConversationTester(server_port=7860)
     await tester.run_all_tests()
 

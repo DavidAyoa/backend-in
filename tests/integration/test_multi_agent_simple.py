@@ -134,7 +134,7 @@ def test_file_structure():
     """Test that all required files exist"""
     required_files = [
         'services/session_manager.py',
-        'bot_fast_api_enhanced.py',
+        'bot/fast_api.py',
         'main.py',
         'config.py',
         'routers/agents.py'

@@ -7,7 +7,7 @@ Manages multiple agents with isolated conversation contexts
 import os
 import uuid
 from typing import Dict, Optional, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
@@ -22,8 +22,8 @@ class AgentSession:
     def __init__(self, session_id: str, agent_id: Optional[int] = None, system_prompt: Optional[str] = None):
         self.session_id = session_id
         self.agent_id = agent_id
-        self.created_at = datetime.utcnow()
-        self.last_activity = datetime.utcnow()
+        self.created_at = datetime.now(timezone.utc)
+        self.last_activity = datetime.now(timezone.utc)
         
         # Create isolated LLM service for this session
         self.llm = OpenAILLMService(
@@ -52,7 +52,7 @@ class AgentSession:
     
     def update_activity(self):
         """Update last activity timestamp"""
-        self.last_activity = datetime.utcnow()
+        self.last_activity = datetime.now(timezone.utc)
     
     def add_user_message(self, message: str):
         """Add a user message to the context"""
@@ -171,7 +171,7 @@ class AgentSessionManager:
     def cleanup_inactive_sessions(self, max_age_hours: int = 24):
         """Clean up sessions that haven't been active for a specified time"""
         from datetime import timedelta
-        cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         
         inactive_sessions = [
             session_id for session_id, session in self.sessions.items()

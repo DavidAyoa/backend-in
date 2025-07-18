@@ -14,6 +14,11 @@ freezegun>=1.2.0   # For mocking time
 factory-boy>=3.2.0 # For test data generation
 faker>=18.0.0      # For generating fake data
 
+# Live conversation testing dependencies
+numpy>=1.26.4      # For audio data generation
+websockets>=13.1   # For WebSocket testing
+requests>=2.31.0   # For HTTP health checks
+
 # Development dependencies
 black>=23.0.0      # Code formatting
 flake8>=6.0.0      # Linting

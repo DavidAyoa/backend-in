@@ -9,7 +9,7 @@ import json
 import uuid
 from typing import Dict, Optional, Any, Literal
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -39,7 +39,7 @@ from pipecat.frames.frames import Frame, TextFrame, AudioRawFrame, Transcription
 from config import config
 from services.session_manager import session_manager
 from models.user import user_db
-from bot_fast_api_enhanced import ServicePool
+from bot.fast_api import ServicePool
 
 load_dotenv(override=True)
 
@@ -148,13 +148,13 @@ class SessionInfo:
     
     def __post_init__(self):
         if self.created_at is None:
-            self.created_at = datetime.utcnow()
+            self.created_at = datetime.now(timezone.utc)
         if self.last_activity is None:
-            self.last_activity = datetime.utcnow()
+            self.last_activity = datetime.now(timezone.utc)
     
     def update_activity(self):
         """Update last activity timestamp"""
-        self.last_activity = datetime.utcnow()
+        self.last_activity = datetime.now(timezone.utc)
 
 class ModeAwareFrameProcessor(FrameProcessor):
     """Frame processor that filters frames based on conversation mode"""
@@ -202,6 +202,7 @@ class ModeAwareFrameProcessor(FrameProcessor):
                     user_id="user",
                     timestamp=getattr(frame, 'timestamp', None)
                 )
+                await self._send_transcript(transcript_frame)
                 await self.push_frame(transcript_frame, direction)
                 return
             else:

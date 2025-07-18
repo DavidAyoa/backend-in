@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Dict, Any, Optional, Callable, Awaitable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 import structlog
 from pipecat.pipeline.pipeline import Pipeline
@@ -125,13 +125,13 @@ class SessionInfo:
     
     def __post_init__(self):
         if self.created_at is None:
-            self.created_at = datetime.utcnow()
+            self.created_at = datetime.now(timezone.utc)
         if self.last_activity is None:
-            self.last_activity = datetime.utcnow()
+            self.last_activity = datetime.now(timezone.utc)
     
     def update_activity(self):
         """Update last activity timestamp"""
-        self.last_activity = datetime.utcnow()
+        self.last_activity = datetime.now(timezone.utc)
 
 
 class BaseTransportManager(ABC):
@@ -173,7 +173,7 @@ class BaseTransportManager(ABC):
     
     async def cleanup_inactive_sessions(self, timeout_seconds: int = 300):
         """Clean up inactive sessions"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         inactive_sessions = []
         
         for session_id, session_info in self.active_sessions.items():

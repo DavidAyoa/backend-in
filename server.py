@@ -226,18 +226,18 @@ class ConnectionManager:
 connection_manager = ConnectionManager()
 
 # Import bot functions
-from bot_fast_api_enhanced import run_bot
-from bot_websocket_server import run_bot_websocket_server
+from bot.fast_api import run_bot
+from bot.websocket_server import run_bot_websocket_server
 
 # Import authentication routers
-from routers.auth import router as auth_router, user_router
+from api.auth import router as auth_router, user_router
 
 # Import agents router  
-from routers.agents import router as agents_router
+from api.agents import router as agents_router
 
 
 # Import flexible conversation bot
-from bot_flexible_conversation import flexible_bot, ConversationMode as FlexibleConversationMode
+from bot.flexible_conversation import flexible_bot, ConversationMode as FlexibleConversationMode
 
 # Pydantic models for chat
 class TextChatRequest(BaseModel):
