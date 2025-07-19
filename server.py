@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.websockets import WebSocketState
 import structlog
 
 # Load environment variables
@@ -150,9 +151,9 @@ class ConnectionManager:
         connection_info = self.connections[client_id]
         session_duration = time.time() - connection_info.connected_at
         
-        # Close WebSocket if still open
+        # Close WebSocket if still open (refined state check per FastAPI/Starlette)
         try:
-            if connection_info.websocket.application_state.name != "DISCONNECT":
+            if connection_info.websocket.client_state != WebSocketState.DISCONNECTED:
                 await connection_info.websocket.close()
         except Exception as e:
             logger.debug("Error closing WebSocket", client_id=client_id, error=str(e))
@@ -201,7 +202,7 @@ class ConnectionManager:
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get current server metrics"""
-        # Calculate capacity usage with safe division
+        # Calculate capacity usage with safe division [docs.python.org](https://docs.python.org/3/library/stdtypes.html)
         capacity_pct = 0.0
         if self.max_connections > 0:
             capacity_pct = (self.metrics.active_connections / self.max_connections) * 100
@@ -225,19 +226,18 @@ class ConnectionManager:
 # Global connection manager
 connection_manager = ConnectionManager()
 
-# Import bot functions
-from bot.fast_api import run_bot
-from bot.websocket_server import run_bot_websocket_server
-
 # Import authentication routers
 from api.auth import router as auth_router, user_router
 
 # Import agents router  
 from api.agents import router as agents_router
 
+# Import flexible conversation functions
+from bot.flexible_conversation import create_voice_conversation, create_text_conversation, create_hybrid_conversation
 
-# Import flexible conversation bot
-from bot.flexible_conversation import flexible_bot, ConversationMode as FlexibleConversationMode
+# Import transport factory for simplified transport management
+from transports.factory import TransportFactory
+from transports.base import TransportType
 
 # Pydantic models for chat
 class TextChatRequest(BaseModel):
@@ -251,27 +251,10 @@ class TextChatResponse(BaseModel):
     agent_id: Optional[int] = None
     timestamp: float
 
-async def run_bot_with_management(websocket: WebSocket, client_id: str):
-    """Run bot with connection management"""
-    try:
-        # Update activity
-        connection_manager.update_activity(client_id)
-        
-        # Run the bot
-        await run_bot(websocket)
-        
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected normally", client_id=client_id)
-    except Exception as e:
-        logger.error("Bot error", client_id=client_id, error=str(e))
-        # Try to close connection gracefully
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except:
-            pass
-    finally:
-        # Always clean up
-        await connection_manager.disconnect(client_id)
+# NEW: For WebRTC SDP offer (integrates with your WebRTC manager)
+class WebRTCOffer(BaseModel):
+    sdp: str
+    type: str = "offer"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -343,20 +326,56 @@ async def get_sessions(current_user: User = Depends(get_current_user)):
     return sessions
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """Enhanced WebSocket endpoint with connection management"""
-    client_id = await connection_manager.connect(websocket)
-    
-    if client_id is None:
-        return  # Connection rejected
-    
-    # Run bot with management
-    await run_bot_with_management(websocket, client_id)
-
-
-@app.websocket("/ws/flexible")
-async def flexible_websocket_endpoint(
+async def websocket_endpoint(
     websocket: WebSocket,
+    token: Optional[str] = None,
+    agent_id: Optional[int] = None,
+    voice_input: bool = True,
+    voice_output: bool = True,
+    system_prompt: Optional[str] = None
+):
+    """Simplified WebSocket endpoint using conversation functions directly"""
+    # Don't use connection manager for this - let Pipecat handle it
+    
+    # TODO: Add authentication validation with token
+    
+    try:
+        # Delegate to appropriate conversation function
+        if voice_input and voice_output:
+            await create_voice_conversation(
+                websocket=websocket,
+                agent_id=agent_id,
+                session_id=str(uuid.uuid4()),
+                system_prompt=system_prompt
+            )
+        elif not voice_input and not voice_output:
+            await create_text_conversation(
+                websocket=websocket,
+                agent_id=agent_id,
+                session_id=str(uuid.uuid4()),
+                system_prompt=system_prompt
+            )
+        else:
+            await create_hybrid_conversation(
+                websocket=websocket,
+                agent_id=agent_id,
+                session_id=str(uuid.uuid4()),
+                system_prompt=system_prompt
+            )
+        
+        logger.info("WebSocket conversation completed")
+        
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected normally")
+    except Exception as e:
+        logger.error("WebSocket error", error=str(e))
+
+# NEW: WebRTC offer endpoint with adaptive transport management
+@app.post("/webrtc/offer")
+async def webrtc_offer(
+    request: Request,
+    offer: WebRTCOffer,
+    transport_type: str = "small_webrtc",  # Ensure it's WebRTC
     token: Optional[str] = None,
     agent_id: Optional[int] = None,
     voice_input: bool = True,
@@ -365,15 +384,19 @@ async def flexible_websocket_endpoint(
     text_output: bool = True,
     enable_interruptions: bool = True
 ):
-    """Flexible WebSocket endpoint with full conversation mode control"""
-    client_id = await connection_manager.connect(websocket)
+    if transport_type != "small_webrtc":
+        raise HTTPException(status_code=400, detail="Invalid transport type for this endpoint")
     
-    if client_id is None:
-        return  # Connection rejected
+    # Capacity check
+    if connection_manager.metrics.active_connections >= connection_manager.max_connections:
+        raise HTTPException(status_code=503, detail="Server at capacity")
     
-    # TODO: Add authentication validation with token
+    client_id = str(uuid.uuid4())  # Generate session ID
     
     try:
+        # Extract headers for adaptive transport detection
+        headers = dict(request.headers)
+        
         # Configure initial mode
         initial_mode = FlexibleConversationMode(
             voice_input=voice_input,
@@ -385,69 +408,40 @@ async def flexible_websocket_endpoint(
         
         # Validate mode
         if not initial_mode.validate():
-            await websocket.close(code=1008, reason="Invalid mode configuration")
-            return
+            raise HTTPException(status_code=400, detail="Invalid mode configuration")
         
-        # Update activity
-        connection_manager.update_activity(client_id)
+        # Create adaptive transport manager (WebRTC for this endpoint)
+        transport_manager = TransportFactory.create_adaptive_transport_manager(
+            request_headers=headers,
+            transport_type=TransportType.WEBRTC,  # Force WebRTC for this endpoint
+            audio_in_enabled=voice_input,
+            audio_out_enabled=voice_output,
+            enable_vad=voice_input,
+            enable_interruptions=enable_interruptions
+        )
         
-        # Run flexible conversation bot
-        await flexible_bot.create_session(
-            websocket,
+        # Create session through transport manager with SDP data
+        session_info = await transport_manager.create_session(
             session_id=client_id,
-            agent_id=agent_id,
-            initial_mode=initial_mode
+            client_sdp=offer.sdp,
+            sdp_type=offer.type,
+            mode=initial_mode
         )
         
-    except Exception as e:
-        logger.error("Flexible WebSocket error", client_id=client_id, error=str(e))
-    finally:
-        await connection_manager.disconnect(client_id)
-
-@app.websocket("/ws/auth")
-async def auth_websocket_endpoint(
-    websocket: WebSocket,
-    token: Optional[str] = None,
-    agent_id: Optional[int] = None
-):
-    """Authenticated WebSocket endpoint"""
-    client_id = await connection_manager.connect(websocket)
-    
-    if client_id is None:
-        return  # Connection rejected
-    
-    # TODO: Add authentication validation with token
-    
-    try:
-        # Run bot with agent-specific context
-        await run_bot_with_management(websocket, client_id)
-    except Exception as e:
-        logger.error("Auth WebSocket error", client_id=client_id, error=str(e))
-    finally:
-        await connection_manager.disconnect(client_id)
-
-@app.post("/chat/text", response_model=TextChatResponse)
-async def text_chat(request: TextChatRequest):
-    """Text-only chat endpoint without voice processing"""
-    # TODO: Add authentication validation
-    
-    try:
-        # Generate or use existing session ID
-        session_id = request.session_id or str(uuid.uuid4())
+        # Get SDP answer from the session
+        answer = await transport_manager.get_session_answer(client_id)
+        if not answer:
+            raise HTTPException(status_code=500, detail="Failed to generate SDP answer")
         
-        # Simple text processing (placeholder)
-        # In a real implementation, this would use the LLM service
-        response_text = f"Echo: {request.message}"
+        logger.info("WebRTC session created via transport manager", 
+                   session_id=client_id, 
+                   transport_type="webrtc")
         
-        return TextChatResponse(
-            response=response_text,
-            session_id=session_id,
-            agent_id=request.agent_id,
-            timestamp=time.time()
-        )
+        return {"sdp": answer["sdp"], "type": answer["type"]}
+        
     except Exception as e:
-        logger.error("Text chat error", error=str(e))
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error("WebRTC offer error", client_id=client_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"WebRTC session creation failed: {str(e)}")
 
 @app.post("/connect")
 async def bot_connect(request: Request) -> Dict[Any, Any]:
@@ -465,11 +459,8 @@ async def bot_connect(request: Request) -> Dict[Any, Any]:
             }
         )
     
-    server_mode = os.getenv("WEBSOCKET_SERVER", "fast_api")
-    if server_mode == "websocket_server":
-        ws_url = "ws://localhost:8765"
-    else:
-        ws_url = "ws://localhost:7860/ws"
+    # Always point to the unified WebSocket endpoint
+    ws_url = "ws://localhost:7860/ws"
     
     return {
         "ws_url": ws_url,
@@ -488,7 +479,7 @@ async def health_check():
     # Determine health status
     capacity_used = 0.0
     if connection_manager.max_connections > 0:
-        capacity_used = metrics["connections"]["active"] / connection_manager.max_connections
+        capacity_used = (metrics["connections"]["active"] / connection_manager.max_connections)
     
     if capacity_used >= 0.9:
         status = "warning"
@@ -526,26 +517,22 @@ async def root():
             "agent_management",
             "voice_processing",
             "websocket_support",
+            "webrtc_support",
             "multi_agent_conversations",
-            "flexible_conversation_modes"
+            "flexible_conversation_modes",
+            "adaptive_transport_management"
         ]
     }
 
 async def main():
     """Main function with optimized configuration"""
-    server_mode = os.getenv("WEBSOCKET_SERVER", "fast_api")
-    tasks = []
-    
     try:
-        if server_mode == "websocket_server":
-            tasks.append(run_bot_websocket_server())
-        
-        # Optimized uvicorn configuration
+        # Optimized uvicorn configuration (suggest Gunicorn for production scaling [mangum.io](https://mangum.io/deploying-asgi-applications-best-practices-and-tools/))
         config = uvicorn.Config(
             app,
             host="0.0.0.0",
             port=int(os.getenv("PORT", "7860")),
-            loop="asyncio",
+            loop="asyncio",  # Explicit asyncio loop [docs.python.org](https://docs.python.org/3/library/asyncio.html)
             ws_max_size=16 * 1024 * 1024,  # 16MB max message size
             ws_ping_interval=20,           # Ping every 20 seconds
             ws_ping_timeout=10,            # Ping timeout 10 seconds
@@ -556,16 +543,15 @@ async def main():
         )
         
         server = uvicorn.Server(config)
-        tasks.append(server.serve())
         
         logger.info("Server starting",
                    max_connections=connection_manager.max_connections,
                    port=int(os.getenv("PORT", "7860")))
         
-        await asyncio.gather(*tasks)
+        await server.serve()
         
-    except Exception as e:
-        logger.error("Server error", error=str(e))
+    except* Exception as exc_group:  # Fine-grained exceptions [docs.python.org](https://docs.python.org/3/contents.html)
+        logger.error("Server error", error=str(exc_group))
         raise
 
 if __name__ == "__main__":

@@ -6,7 +6,10 @@ This directory contains comprehensive tests for the Voice Agent Backend API. The
 
 ## Test Files
 
-- **`test_api_comprehensive.py`** - Main comprehensive test suite covering all API endpoints
+- **`test_pytest_integration.py`** - Comprehensive pytest-based test suite covering all API endpoints
+- **`integration/test_server_endpoints.py`** - Server endpoint and WebSocket functionality tests
+- **`integration/test_*.py`** - Various integration tests for specific components
+- **`unit/test_*.py`** - Unit tests for individual components
 - **`../run_tests.py`** - Easy-to-use test runner script
 
 ## Running Tests
@@ -28,10 +31,16 @@ This directory contains comprehensive tests for the Voice Agent Backend API. The
 
 ```bash
 # Using the test runner (recommended)
-python3 run_tests.py
+python3 run_tests.py --all
 
-# Or run directly
-python3 tests/test_api_comprehensive.py
+# Or run specific test suites
+python3 run_tests.py --api      # API integration tests
+python3 run_tests.py --unit     # Unit tests
+python3 run_tests.py --integration  # Integration tests
+
+# Or run directly with pytest
+pytest tests/test_pytest_integration.py -v
+pytest tests/integration/ -v
 ```
 
 ## Test Coverage
@@ -105,26 +114,21 @@ Status: ⚠️  MODERATE - Some tests failed
 
 To add new test cases:
 
-1. Add new test methods to the `VoiceAgentAPITester` class in `test_api_comprehensive.py`
-2. Follow the existing pattern:
+1. Add new test methods to the appropriate test class in `test_pytest_integration.py` or create new test files
+2. Follow the existing pytest pattern:
    ```python
-   async def test_new_feature(self) -> bool:
+   @pytest.mark.asyncio
+   async def test_new_feature(self):
        """Test description"""
-       print("\\n=== Testing New Feature ===")
-       
-       try:
+       async with httpx.AsyncClient(base_url=BASE_URL) as client:
            # Test implementation
-           if success:
-               print("✅ Test passed")
-               return True
-           else:
-               print("❌ Test failed")
-               return False
-       except Exception as e:
-           print(f"❌ Test error: {e}")
-           return False
+           response = await client.get("/endpoint")
+           assert response.status_code == 200
+           # Additional assertions
    ```
-3. Add the test to the `run_all_tests()` method
+3. Use appropriate pytest markers for test categorization:
+   - `@pytest.mark.integration` for integration tests
+   - `@pytest.mark.slow` for performance tests
 4. Update this README with the new test coverage
 
 ## Debugging Failed Tests

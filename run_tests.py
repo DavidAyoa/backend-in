@@ -30,7 +30,7 @@ def install_dependencies():
     """Install test dependencies"""
     print("📦 Installing test dependencies...")
     return run_command([
-        "uv", "pip", "install", "-r", "requirements-test.txt"
+        "uv", "sync", "--group", "test"
     ], "Installing test dependencies")
 
 def run_unit_tests():
@@ -87,48 +87,13 @@ def run_performance_tests():
         "-v", "--tb=short"
     ], "Running performance tests")
 
-def run_legacy_api_tests():
-    """Run legacy API tests (requires server running)"""
-    print("🧪 Running legacy API tests (requires server)")
-    
-    # Check if server is running
-    import httpx
-    try:
-        import httpx
-        with httpx.Client() as client:
-            response = client.get("http://localhost:7860/health", timeout=5.0)
-            if response.status_code != 200:
-                print("❌ Server is not responding properly")
-                print("   Please start the server with: python3 main.py")
-                return False
-    except Exception as e:
-        print("❌ Server is not running")
-        print("   Please start the server with: python3 main.py")
-        print(f"   Error: {e}")
-        return False
-    
-    print("✅ Server is running, starting legacy API tests...\n")
-    
-    # Run legacy tests
-    try:
-        from tests.test_api_comprehensive import VoiceAgentAPITester
-        
-        async def run_legacy():
-            async with VoiceAgentAPITester() as tester:
-                results = await tester.run_all_tests()
-                tester.print_test_summary(results)
-                
-                # Return success status
-                passed = sum(1 for result in results.values() if result)
-                total = len(results)
-                success_rate = (passed / total) * 100
-                
-                return success_rate >= 80  # 80% success rate required
-        
-        return asyncio.run(run_legacy())
-    except ImportError:
-        print("❌ Legacy API tests not available")
-        return False
+def run_api_tests():
+    """Run API integration tests with pytest"""
+    return run_command([
+        "uv", "run", "pytest", 
+        "tests/test_pytest_integration.py",
+        "-v", "--tb=short"
+    ], "Running API integration tests")
 
 def lint_code():
     """Run code linting"""
@@ -175,7 +140,7 @@ def main():
     parser.add_argument("--coverage", action="store_true", help="Run tests with coverage")
     parser.add_argument("--integration", action="store_true", help="Run integration tests")
     parser.add_argument("--performance", action="store_true", help="Run performance tests")
-    parser.add_argument("--legacy", action="store_true", help="Run legacy API tests")
+    parser.add_argument("--api", action="store_true", help="Run API integration tests")
     parser.add_argument("--lint", action="store_true", help="Run code linting")
     parser.add_argument("--format", action="store_true", help="Format code")
     parser.add_argument("--test", type=str, help="Run specific test by name")
@@ -211,8 +176,8 @@ def main():
     if args.performance:
         success &= run_performance_tests()
     
-    if args.legacy:
-        success &= run_legacy_api_tests()
+    if args.api:
+        success &= run_api_tests()
     
     if args.lint:
         success &= lint_code()
@@ -237,7 +202,7 @@ def main():
         print("  python run_tests.py --install     # Install dependencies")
         print("  python run_tests.py --all         # Run all tests")
         print("  python run_tests.py --coverage    # Run tests with coverage")
-        print("  python run_tests.py --legacy      # Run legacy API tests")
+        print("  python run_tests.py --api         # Run API integration tests")
         print("  python run_tests.py --ci          # Run full CI pipeline")
         return
     

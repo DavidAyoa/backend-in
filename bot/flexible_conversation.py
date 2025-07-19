@@ -1,651 +1,374 @@
 #!/usr/bin/env python3
 """
-Flexible Conversation Bot Implementation
-Following Pipecat best practices with proper pipeline management
+Simplified Conversation Bot Implementation
+Following Pipecat best practices with minimal complexity and proper separation of concerns
 """
 
-import asyncio
 import json
-import uuid
-from typing import Dict, Optional, Any, Literal
+from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from loguru import logger
 import structlog
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.audio.interruptions.min_words_interruption_strategy import MinWordsInterruptionStrategy
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
-from pipecat.processors.filters.stt_mute_filter import STTMuteFilter, STTMuteConfig, STTMuteStrategy
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.google.tts import GoogleTTSService
 from pipecat.services.google.stt import GoogleSTTService
-from pipecat.transcriptions.language import Language
 from pipecat.transports.network.fastapi_websocket import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
-from pipecat.frames.frames import Frame, TextFrame, AudioRawFrame, TranscriptionFrame, StartFrame, EndFrame, CancelFrame
+from pipecat.transports.network.small_webrtc import (
+    SmallWebRTCTransport,
+    SmallWebRTCTransportParams,
+)
+from pipecat.frames.frames import (
+    Frame, TranscriptionFrame, LLMMessagesFrame
+)
 
-# Import configuration
+# Import your existing config and services
 from config import config
 from services.session_manager import session_manager
-from models.user import user_db
-from bot.fast_api import ServicePool
 
 load_dotenv(override=True)
-
-# Configure logging
 slog = structlog.get_logger()
 
 @dataclass
-class ConversationMode:
-    """Configuration for flexible conversation mode"""
-    # Input modes
-    voice_input: bool = True
-    text_input: bool = True
-    
-    # Output modes
-    voice_output: bool = True
-    text_output: bool = True
-    
-    # Additional settings
+class BotConfig:
+    """Simple configuration for bot modes"""
+    enable_voice_input: bool = True
+    enable_voice_output: bool = True
     enable_interruptions: bool = True
-    
-    @property
-    def mode(self) -> str:
-        """Get a descriptive mode string"""
-        inputs = []
-        outputs = []
-        
-        if self.voice_input:
-            inputs.append("voice")
-        if self.text_input:
-            inputs.append("text")
-            
-        if self.voice_output:
-            outputs.append("voice")
-        if self.text_output:
-            outputs.append("text")
-            
-        input_str = "+".join(inputs) if inputs else "none"
-        output_str = "+".join(outputs) if outputs else "none"
-        
-        return f"{input_str}_to_{output_str}"
-    
-    @property
-    def has_voice_input(self) -> bool:
-        """Check if voice input is enabled"""
-        return self.voice_input
-    
-    @property 
-    def has_text_input(self) -> bool:
-        """Check if text input is enabled"""
-        return self.text_input
-    
-    @property
-    def has_voice_output(self) -> bool:
-        """Check if voice output is enabled"""
-        return self.voice_output
-    
-    @property
-    def has_text_output(self) -> bool:
-        """Check if text output is enabled"""
-        return self.text_output
-    
-    @classmethod
-    def voice_only(cls) -> 'ConversationMode':
-        """Voice input and output only"""
-        return cls(voice_input=True, text_input=False, voice_output=True, text_output=False)
-    
-    @classmethod
-    def text_only(cls) -> 'ConversationMode':
-        """Text input and output only"""
-        return cls(voice_input=False, text_input=True, voice_output=False, text_output=True)
-    
-    @classmethod
-    def voice_to_text(cls) -> 'ConversationMode':
-        """Voice input to text output"""
-        return cls(voice_input=True, text_input=False, voice_output=False, text_output=True)
-    
-    @classmethod
-    def text_to_voice(cls) -> 'ConversationMode':
-        """Text input to voice output"""
-        return cls(voice_input=False, text_input=True, voice_output=True, text_output=False)
-    
-    @classmethod
-    def full_multimodal(cls) -> 'ConversationMode':
-        """All input and output modes enabled"""
-        return cls(voice_input=True, text_input=True, voice_output=True, text_output=True)
-    
-    def validate(self) -> bool:
-        """Validate mode configuration"""
-        # Must have at least one input and one output
-        has_input = self.voice_input or self.text_input
-        has_output = self.voice_output or self.text_output
-        return has_input and has_output
+    agent_id: Optional[int] = None
+    session_id: Optional[str] = None
+    system_prompt: Optional[str] = None
 
-@dataclass
-class SessionInfo:
-    """Information about an active session"""
-    session_id: str
-    mode: ConversationMode
-    context: OpenAILLMContext
-    pipeline: Optional[Pipeline] = None
-    task: Optional[PipelineTask] = None
-    runner: Optional[PipelineRunner] = None
-    transport: Optional[FastAPIWebsocketTransport] = None
-    created_at: datetime = None
-    last_activity: datetime = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now(timezone.utc)
-        if self.last_activity is None:
-            self.last_activity = datetime.now(timezone.utc)
-    
-    def update_activity(self):
-        """Update last activity timestamp"""
-        self.last_activity = datetime.now(timezone.utc)
+# Removed SimpleTextProcessor - using standard Pipecat processors instead
 
-class ModeAwareFrameProcessor(FrameProcessor):
-    """Frame processor that filters frames based on conversation mode"""
+def get_context(session_id: Optional[str], system_prompt: Optional[str]) -> OpenAILLMContext:
+    """Simple context creation - let Pipecat handle the complexity"""
+    if session_id and session_id in session_manager.sessions:
+        session = session_manager.get_session(session_id)
+        if session and session.context:
+            slog.info("Using existing session context", session_id=session_id)
+            return session.context
     
-    def __init__(self, session_id: str, bot: 'FlexibleConversationBot'):
-        super().__init__()
-        self.session_id = session_id
-        self.bot = bot
-        
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        """Process frames based on current mode"""
-        # Always call super() first for proper initialization
-        await super().process_frame(frame, direction)
-        
-        # Always pass through StartFrame and EndFrame without checking
-        if isinstance(frame, (StartFrame, EndFrame)):
-            await self.push_frame(frame, direction)
-            return
-            
-        if self.session_id not in self.bot.active_sessions:
-            # Pass through frame if session not found
-            await self.push_frame(frame, direction)
-            return
-            
-        session = self.bot.active_sessions[self.session_id]
-        mode = session.mode
-        
-        # Update session activity
-        session.update_activity()
-        
-        # Handle audio input frames
-        if isinstance(frame, AudioRawFrame):
-            if not mode.has_voice_input:
-                # Drop audio frames if voice input is disabled
-                slog.debug("Dropping audio frame - voice input disabled", session_id=self.session_id)
-                return
-            
-        # Handle text input frames (from client)
-        if isinstance(frame, TextFrame) and direction == FrameDirection.DOWNSTREAM:
-            if mode.has_text_input:
-                # Convert TextFrame to TranscriptionFrame to trigger LLM processing
-                slog.debug("Converting text input to transcription", session_id=self.session_id, text=frame.text)
-                transcript_frame = TranscriptionFrame(
-                    text=frame.text,
-                    user_id="user",
-                    timestamp=getattr(frame, 'timestamp', None)
-                )
-                await self._send_transcript(transcript_frame)
-                await self.push_frame(transcript_frame, direction)
-                return
-            else:
-                slog.debug("Dropping text input - text input disabled", session_id=self.session_id)
-                return
-        
-        # Handle text output frames (to client)
-        elif isinstance(frame, TextFrame) and direction == FrameDirection.UPSTREAM:
-            if not mode.has_text_output:
-                # Drop text frames if text output is disabled
-                slog.debug("Dropping text frame - text output disabled", session_id=self.session_id)
-                return
-            else:
-                # Send text response to client
-                await self._send_text_response(frame)
-            
-        # Handle transcript frames
-        if isinstance(frame, TranscriptionFrame):
-            if mode.has_text_output:
-                # Send transcript to client if text output is enabled
-                await self._send_transcript(frame)
-            # Always pass through transcripts for processing
-            await self.push_frame(frame, direction)
-            return
-            
-        # Pass through allowed frames
-        await self.push_frame(frame, direction)
+    # Create new context
+    prompt = system_prompt or config.get_system_prompt()
+    context = OpenAILLMContext([
+        {"role": "system", "content": prompt}
+    ])
     
-    async def _send_transcript(self, frame):
-        """Send transcript to client via WebSocket"""
-        session = self.bot.active_sessions[self.session_id]
-        if session.transport and session.transport._client:
-            try:
-                await session.transport._client.send(json.dumps({
-                    "type": "transcript",
-                    "data": {
-                        "text": frame.text,
-                        "timestamp": getattr(frame, 'timestamp', None),
-                        "is_final": getattr(frame, 'is_final', True),
-                        "source": "user"
-                    }
-                }))
-            except Exception as e:
-                slog.error("Error sending transcript", session_id=self.session_id, error=str(e))
-    
-    async def _send_text_response(self, frame: TextFrame):
-        """Send text response to client via WebSocket"""
-        session = self.bot.active_sessions[self.session_id]
-        if session.transport and session.transport._client:
-            try:
-                await session.transport._client.send(json.dumps({
-                    "type": "assistant_response",
-                    "data": {
-                        "text": frame.text,
-                        "timestamp": getattr(frame, 'timestamp', None),
-                        "source": "assistant"
-                    }
-                }))
-            except Exception as e:
-                slog.error("Error sending text response", session_id=self.session_id, error=str(e))
+    slog.info("Created new session context", session_id=session_id)
+    return context
 
-class FlexibleConversationBot:
-    """Flexible conversation bot with proper pipeline management"""
+class PipecatConversationBot:
+    """Simplified conversation bot following Pipecat patterns"""
     
     def __init__(self):
-        self.active_sessions: Dict[str, SessionInfo] = {}
-        self.service_pool = ServicePool()
-        slog.info("Initialized FlexibleConversationBot")
+        slog.info("Initialized PipecatConversationBot")
     
-    async def create_session(
-        self, 
+    async def create_pipeline(
+        self,
         websocket,
-        session_id: Optional[str] = None,
-        agent_id: Optional[int] = None,
-        system_prompt: Optional[str] = None,
-        initial_mode: ConversationMode = ConversationMode()
-    ) -> str:
-        """Create a new session with specified mode"""
+        bot_config: BotConfig
+    ) -> PipelineTask:
+        """Create a pipeline with proper component ordering"""
         
-        # Generate session ID if not provided
-        if session_id is None:
-            session_id = str(uuid.uuid4())
+        # Get session context using simplified approach
+        context = get_context(bot_config.session_id, bot_config.system_prompt)
         
-        # Create or get session context
-        if session_id not in session_manager.sessions:
-            session_manager.create_session(session_id, agent_id, system_prompt)
+        # Create services
+        transport = await self._create_transport(websocket, bot_config)
+        llm_service = self._create_llm_service()
+        context_aggregator = llm_service.create_context_aggregator(context)
         
-        agent_session = session_manager.get_session(session_id)
+        # Build pipeline components in correct Pipecat order
+        components = [
+            transport.input(),    # Input from transport
+        ]
         
-        # Use agent session's context if available
-        if agent_session:
-            context = agent_session.context
-        else:
-            # Fallback to default context
-            context = OpenAILLMContext([
-                {
-                    "role": "system",
-                    "content": system_prompt or config.get_system_prompt(),
-                },
-                {
-                    "role": "user",
-                    "content": "Start by greeting the user warmly and introducing yourself.",
-                }
-            ])
+        # Add STT if voice input enabled
+        if bot_config.enable_voice_input:
+            stt_service = self._create_stt_service()
+            components.append(stt_service)
         
-        # Create session info
-        session = SessionInfo(
-            session_id=session_id,
-            mode=initial_mode,
-            context=context
+        # Context aggregator user side (captures user messages)
+        components.append(context_aggregator.user())
+        
+        # LLM service processes the conversation
+        components.append(llm_service)
+        
+        # Add TTS if voice output enabled
+        if bot_config.enable_voice_output:
+            tts_service = self._create_tts_service(bot_config.agent_id)
+            components.append(tts_service)
+        
+        # Context aggregator assistant side (captures assistant responses) - BEFORE output
+        components.append(context_aggregator.assistant())
+        
+        # Output to transport
+        components.append(transport.output())
+        
+        # Create pipeline and task
+        pipeline = Pipeline(components)
+        task = self._create_pipeline_task(pipeline, bot_config)
+        
+        # Set up transport event handlers - this is where WebSocket communication happens
+        await self._setup_transport_handlers(transport, task, bot_config)
+        
+        return task
+    
+    def _create_pipeline_task(self, pipeline: Pipeline, bot_config: BotConfig) -> PipelineTask:
+        """Create pipeline task with appropriate parameters"""
+        task_params = PipelineParams(
+            allow_interruptions=bot_config.enable_interruptions,
+            enable_metrics=getattr(config, 'ENABLE_METRICS', False),
+            enable_usage_metrics=getattr(config, 'ENABLE_METRICS', False),
         )
         
-        # Add session to active sessions first
-        self.active_sessions[session_id] = session
-        
-        # Initialize pipeline for this session
-        await self._initialize_session_pipeline(session_id, session, websocket, agent_id)
-        
-        slog.info("Created session", session_id=session_id, mode=initial_mode.mode, agent_id=agent_id)
-        return session_id
+        return PipelineTask(pipeline, params=task_params)
     
-    async def switch_mode(self, session_id: str, new_mode: ConversationMode):
-        """Switch session to new mode by recreating pipeline"""
-        if session_id not in self.active_sessions:
-            raise ValueError(f"Session {session_id} not found")
+    async def _create_transport(self, transport_or_websocket, bot_config: BotConfig):
+        """Create transport with appropriate configuration"""
         
-        session = self.active_sessions[session_id]
+        # If it's already a SmallWebRTCTransport, return it as-is
+        if isinstance(transport_or_websocket, SmallWebRTCTransport):
+            return transport_or_websocket
         
-        # Preserve context
-        old_context = session.context
-        
-        # Stop current pipeline
-        if session.task:
-            try:
-                await session.task.cancel()
-            except Exception as e:
-                slog.warning("Error canceling task", session_id=session_id, error=str(e))
-        
-        # Update mode and recreate pipeline
-        session.mode = new_mode
-        await self._initialize_session_pipeline(session_id, session, session.transport.websocket)
-        
-        # Restore context
-        session.context = old_context
-        
-        slog.info("Switched mode", session_id=session_id, new_mode=new_mode.mode)
-    
-    async def _initialize_session_pipeline(
-        self, 
-        session_id: str, 
-        session: SessionInfo, 
-        websocket,
-        agent_id: Optional[int] = None
-    ):
-        """Initialize pipeline for session based on current mode"""
-        mode = session.mode
-        
-        # Create services for this mode
-        services = await self._create_services_for_mode(session_id, mode, agent_id)
-        
-        # Create transport for this mode
-        transport = await self._create_transport_for_mode(mode, websocket)
-        session.transport = transport
-        
-        # Build pipeline components
-        pipeline_components = await self._build_pipeline_components(
-            session_id, mode, services, transport, session.context
-        )
-        
-        # Create pipeline
-        pipeline = Pipeline(pipeline_components)
-        session.pipeline = pipeline
-        
-        # Create task with mode-specific parameters
-        task = PipelineTask(
-            pipeline,
-            params=PipelineParams(
-                allow_interruptions=mode.enable_interruptions,
-                enable_metrics=config.ENABLE_METRICS,
-                enable_usage_metrics=config.ENABLE_METRICS,
-                interruption_strategies=[
-                    MinWordsInterruptionStrategy(min_words=3)
-                ] if mode.enable_interruptions else []
+        # Otherwise, create a FastAPI WebSocket transport
+        # Configure VAD if voice input is enabled
+        vad_analyzer = None
+        if bot_config.enable_voice_input:
+            vad_analyzer = SileroVADAnalyzer(
+                params=VADParams(min_speech_duration_ms=500)
             )
-        )
-        session.task = task
         
-        # Create runner
-        runner = PipelineRunner(handle_sigint=False)
-        session.runner = runner
-        
-        # Set up event handlers
-        await self._setup_event_handlers(session_id, transport, task)
-        
-        # Run the pipeline (wait for completion)
-        await self._run_pipeline(session_id, runner, task)
-    
-    async def _create_services_for_mode(self, session_id: str, mode: ConversationMode, agent_id: Optional[int] = None):
-        """Create services optimized for the specific mode"""
-        services = {}
-        
-        # Always create LLM service
-        services['llm'] = self.service_pool.get_llm_service(session_id)
-        
-        # Create STT only if voice input is enabled
-        if mode.has_voice_input:
-            services['stt'] = self.service_pool.get_stt_service(session_id)
-            services['vad'] = self.service_pool.get_vad_analyzer(session_id)
-        
-        # Create TTS only if voice output is enabled
-        if mode.has_voice_output:
-            services['tts'] = self.service_pool.get_tts_service(session_id, agent_id)
-        
-        return services
-    
-    async def _create_transport_for_mode(self, mode: ConversationMode, websocket) -> FastAPIWebsocketTransport:
-        """Create transport optimized for the specific mode"""
-        
-        # Configure transport parameters based on mode
         params = FastAPIWebsocketParams(
-            audio_in_enabled=mode.has_voice_input,
-            audio_out_enabled=mode.has_voice_output,
+            audio_in_enabled=bot_config.enable_voice_input,
+            audio_out_enabled=bot_config.enable_voice_output,
             add_wav_header=False,
-            vad_analyzer=SileroVADAnalyzer() if mode.has_voice_input else None,
+            vad_analyzer=vad_analyzer,
             serializer=ProtobufFrameSerializer(),
         )
         
         return FastAPIWebsocketTransport(
-            websocket=websocket,
+            websocket=transport_or_websocket,
             params=params
         )
     
-    async def _build_pipeline_components(
-        self, 
-        session_id: str,
-        mode: ConversationMode, 
-        services: Dict[str, Any], 
-        transport: FastAPIWebsocketTransport,
-        context: OpenAILLMContext
-    ) -> list:
-        """Build pipeline components based on mode"""
-        
-        # Create context aggregator
-        context_aggregator = services['llm'].create_context_aggregator(context)
-        
-        # Create mode-aware frame processor
-        frame_processor = ModeAwareFrameProcessor(session_id, self)
-        
-        # Build pipeline components
-        components = [transport.input()]
-        
-        # Add frame processor early in pipeline
-        components.append(frame_processor)
-        
-        # Add STT for voice input
-        if mode.has_voice_input and 'stt' in services:
-            # STT Mute Filter for better interruption control
-            # Only mute for voice interactions to avoid blocking text input
-            stt_mute_filter = STTMuteFilter(
-                config=STTMuteConfig(
-                    strategies={
-                        STTMuteStrategy.FUNCTION_CALL,
-                    } if mode.has_voice_output else set()  # Only mute for voice output
-                )
-            )
-            components.extend([stt_mute_filter, services['stt']])
-        
-        # Add core processing components
-        components.extend([
-            context_aggregator.user(),
-            services['llm'],
-        ])
-        
-        # Add TTS for voice output
-        if mode.has_voice_output and 'tts' in services:
-            components.append(services['tts'])
-        
-        # Add output and context aggregator
-        components.extend([
-            transport.output(),
-            context_aggregator.assistant(),
-        ])
-        
-        return components
+    def _create_llm_service(self) -> OpenAILLMService:
+        """Create LLM service"""
+        return OpenAILLMService(
+            api_key=config.OPENAI_API_KEY,
+            model=getattr(config, 'LLM_MODEL', "gpt-4o-mini"),
+        )
     
-    async def _setup_event_handlers(self, session_id: str, transport: FastAPIWebsocketTransport, task: PipelineTask):
-        """Set up event handlers for the session"""
-        
-        @transport.event_handler("on_client_connected")
-        async def on_client_connected(transport, client):
-            slog.info("Client connected", session_id=session_id)
-            # Don't send anything immediately to avoid race conditions
-        
-        @transport.event_handler("on_client_disconnected")
-        async def on_client_disconnected(transport, client):
-            slog.info("Client disconnected", session_id=session_id)
-            await self.cleanup_session(session_id)
+    def _create_stt_service(self) -> GoogleSTTService:
+        """Create STT service"""
+        return GoogleSTTService(
+            credentials=config.GOOGLE_CREDENTIALS,
+            language="en-US",
+        )
     
-    async def _handle_websocket_message(self, session_id: str, transport: FastAPIWebsocketTransport, message: str):
-        """Handle incoming WebSocket messages"""
-        try:
-            data = json.loads(message)
-            message_type = data.get("type")
-            
-            if message_type == "mode_change":
-                # Handle mode change request
-                new_mode_data = data.get("data", {})
-                new_mode = ConversationMode(
-                    voice_input=new_mode_data.get("voice_input", True),
-                    text_input=new_mode_data.get("text_input", True),
-                    voice_output=new_mode_data.get("voice_output", True),
-                    text_output=new_mode_data.get("text_output", True),
-                    enable_interruptions=new_mode_data.get("enable_interruptions", True)
-                )
-                
-                # Validate mode
-                if not new_mode.validate():
-                    await transport._client.send(json.dumps({
-                        "type": "error",
-                        "data": {
-                            "message": "Invalid mode configuration: must have at least one input and one output"
-                        }
-                    }))
-                    return
-                
-                await self.switch_mode(session_id, new_mode)
-                
-                # Send confirmation
-                await transport._client.send(json.dumps({
-                    "type": "mode_changed",
-                    "data": {
-                        "mode": new_mode.mode,
-                        "voice_input": new_mode.voice_input,
-                        "text_input": new_mode.text_input,
-                        "voice_output": new_mode.voice_output,
-                        "text_output": new_mode.text_output,
-                        "enable_interruptions": new_mode.enable_interruptions
-                    }
-                }))
-                
-            elif message_type == "text_message":
-                # Handle text-only messages
-                await self._handle_text_message(session_id, data.get("data", {}))
-                
-        except json.JSONDecodeError:
-            slog.warning("Invalid JSON message received", session_id=session_id)
-        except Exception as e:
-            slog.error("Error processing message", session_id=session_id, error=str(e))
-    
-    async def _handle_text_message(self, session_id: str, data: Dict[str, Any]):
-        """Handle text message input"""
-        text_content = data.get("text", "")
-        if not text_content:
-            return
-        
-        session = self.active_sessions[session_id]
-        
-        # Add to context
-        session.context.messages.append({
-            "role": "user",
-            "content": text_content
-        })
-        
-        # Send transcript if text output is enabled
-        if session.mode.has_text_output:
-            await session.transport._client.send(json.dumps({
-                "type": "transcript",
-                "data": {
-                    "text": text_content,
-                    "is_final": True,
-                    "source": "user"
-                }
-            }))
-        
-        # Process through LLM
-        # This would typically be handled by the pipeline, but for text mode
-        # we might need to manually trigger processing
-        slog.debug("Processed text message", session_id=session_id, text_length=len(text_content))
-    
-    async def _run_pipeline(self, session_id: str, runner: PipelineRunner, task: PipelineTask):
-        """Run the pipeline for a session"""
-        try:
-            await runner.run(task)
-        except Exception as e:
-            slog.error("Pipeline error", session_id=session_id, error=str(e))
-            await self.cleanup_session(session_id)
-    
-    async def cleanup_session(self, session_id: str):
-        """Clean up session resources"""
-        if session_id not in self.active_sessions:
-            return
-        
-        session = self.active_sessions[session_id]
-        
-        # Cancel task
-        if session.task:
-            try:
-                await session.task.cancel()
-            except Exception as e:
-                slog.debug("Error canceling task", session_id=session_id, error=str(e))
-        
-        # Close transport
-        if session.transport:
-            try:
-                await session.transport._client.disconnect()
-            except Exception as e:
-                slog.debug("Error closing transport", session_id=session_id, error=str(e))
-        
-        # Remove from active sessions (if still present)
-        if session_id in self.active_sessions:
-            del self.active_sessions[session_id]
-        
-        # Clean up service pool
-        await self.service_pool.cleanup_session(session_id)
-        
-        slog.info("Cleaned up session", session_id=session_id)
-    
-    def get_session_info(self, session_id: str) -> Optional[SessionInfo]:
-        """Get session information"""
-        return self.active_sessions.get(session_id)
-    
-    def get_active_sessions(self) -> Dict[str, SessionInfo]:
-        """Get all active sessions"""
-        return self.active_sessions.copy()
-    
-    def get_session_stats(self) -> Dict[str, Any]:
-        """Get session statistics"""
-        total_sessions = len(self.active_sessions)
-        voice_sessions = sum(1 for s in self.active_sessions.values() if s.mode.voice_input)
-        text_sessions = sum(1 for s in self.active_sessions.values() if s.mode.text_input)
-        
-        return {
-            "total_sessions": total_sessions,
-            "voice_sessions": voice_sessions,
-            "text_sessions": text_sessions,
-            "sessions_by_mode": {
-                "voice": voice_sessions,
-                "text": text_sessions
-            }
+    def _create_tts_service(self, agent_id: Optional[int] = None) -> GoogleTTSService:
+        """Create TTS service with agent-specific voice selection"""
+        # Simple voice selection based on agent_id
+        voice_map = {
+            1: "en-US-Chirp3-HD-Achernar",
+            2: "en-US-Chirp3-HD-Achird",
+            3: "en-US-Chirp3-HD-Aoede",
+            4: "en-US-Chirp3-HD-Charon",
+            5: "en-US-Chirp3-HD-Despina",
         }
+        
+        voice_name = voice_map.get(agent_id, "en-US-Chirp3-HD-Laomedeia")
+        
+        return GoogleTTSService(
+            credentials=config.GOOGLE_CREDENTIALS,
+            voice_id=voice_name,
+            language="en-US",
+        )
+    
+    async def _setup_transport_handlers(
+        self, 
+        transport, 
+        task: PipelineTask,
+        bot_config: BotConfig
+    ):
+        """Set up simplified transport event handlers"""
+        
+        @transport.event_handler("on_first_participant_joined")
+        async def on_first_participant_joined(transport, participant):
+            slog.info("First participant joined", session_id=bot_config.session_id)
+            # Send initial greeting through the pipeline using proper frame
+            await task.queue_frames([
+                LLMMessagesFrame([{"role": "user", "content": "Hello!"}])
+            ])
+        
+        @transport.event_handler("on_participant_left")
+        async def on_participant_left(transport, participant, reason):
+            slog.info("Participant left", session_id=bot_config.session_id, reason=reason)
 
-# Global instance
-flexible_bot = FlexibleConversationBot()
+# Simplified factory functions
+async def create_voice_conversation(
+    websocket, 
+    agent_id: Optional[int] = None, 
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a voice-enabled conversation"""
+    await websocket.accept()  # Add this line
+    bot = PipecatConversationBot()
+    bot_config = BotConfig(
+        enable_voice_input=True,
+        enable_voice_output=True,
+        enable_interruptions=True,
+        agent_id=agent_id,
+        session_id=session_id,
+        system_prompt=system_prompt
+    )
+    
+    task = await bot.create_pipeline(websocket, bot_config)
+    
+    # Run the pipeline
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
 
-# Export for use in main application
-__all__ = ['FlexibleConversationBot', 'ConversationMode', 'SessionInfo', 'flexible_bot']
+async def create_text_conversation(
+    websocket, 
+    agent_id: Optional[int] = None, 
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a text-only conversation"""
+    await websocket.accept()  # Add this line
+    bot = PipecatConversationBot()
+    bot_config = BotConfig(
+        enable_voice_input=False,
+        enable_voice_output=False,
+        enable_interruptions=False,
+        agent_id=agent_id,
+        session_id=session_id,
+        system_prompt=system_prompt
+    )
+    
+    task = await bot.create_pipeline(websocket, bot_config)
+    
+    # Run the pipeline
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+async def create_hybrid_conversation(
+    websocket, 
+    agent_id: Optional[int] = None, 
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a conversation with all modalities enabled"""
+    await websocket.accept()  # Add this line
+    bot = PipecatConversationBot()
+    bot_config = BotConfig(
+        enable_voice_input=True,
+        enable_voice_output=True,
+        enable_interruptions=True,
+        agent_id=agent_id,
+        session_id=session_id,
+        system_prompt=system_prompt
+    )
+    
+    task = await bot.create_pipeline(websocket, bot_config)
+    
+    # Run the pipeline
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+async def create_webrtc_voice_conversation(
+    transport: SmallWebRTCTransport,
+    agent_id: Optional[int] = None, 
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a WebRTC voice-enabled conversation"""
+    bot = PipecatConversationBot()
+    bot_config = BotConfig(
+        enable_voice_input=True,
+        enable_voice_output=True,
+        enable_interruptions=True,
+        agent_id=agent_id,
+        session_id=session_id,
+        system_prompt=system_prompt
+    )
+    
+    task = await bot.create_pipeline(transport, bot_config)
+    
+    # Run the pipeline
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+async def create_webrtc_text_conversation(
+    transport: SmallWebRTCTransport,
+    agent_id: Optional[int] = None, 
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a WebRTC text-only conversation"""
+    bot = PipecatConversationBot()
+    bot_config = BotConfig(
+        enable_voice_input=False,
+        enable_voice_output=False,
+        enable_interruptions=False,
+        agent_id=agent_id,
+        session_id=session_id,
+        system_prompt=system_prompt
+    )
+    
+    task = await bot.create_pipeline(transport, bot_config)
+    
+    # Run the pipeline
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+async def create_webrtc_hybrid_conversation(
+    transport: SmallWebRTCTransport,
+    agent_id: Optional[int] = None, 
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a WebRTC-enabled conversation with both voice and text"""
+    bot = PipecatConversationBot()
+    bot_config = BotConfig(
+        enable_voice_input=True,
+        enable_voice_output=True,
+        enable_interruptions=True,
+        agent_id=agent_id,
+        session_id=session_id,
+        system_prompt=system_prompt
+    )
+    
+    task = await bot.create_pipeline(transport, bot_config)
+    
+    # Run the pipeline
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+# Export the main functions
+__all__ = [
+    'PipecatConversationBot', 
+    'BotConfig',
+    'get_context',
+    'create_voice_conversation',
+    'create_text_conversation', 
+    'create_hybrid_conversation',
+    'create_webrtc_voice_conversation',
+    'create_webrtc_text_conversation',
+    'create_webrtc_hybrid_conversation'
+]
