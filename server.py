@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Voice Agent Server
-Focus: Stability and 25 concurrent user support
+Enhanced Voice Agent Server - Pipecat Compatible
+Focus: Stability and 25 concurrent user support using Pipecat's native transport system
 """
 
 import asyncio
@@ -20,6 +20,23 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 import structlog
+
+# Pipecat imports - using native transport system
+from pipecat.transports.services.helpers.daily_rest import DailyRESTHelper, DailyRoomObject, DailyRoomProperties
+from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.base_input import BaseInputTransport
+from pipecat.transports.base_output import BaseOutputTransport
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.frames.frames import Frame, AudioRawFrame, TextFrame
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.services.openai import OpenAILLMService
+from pipecat.services.google import GoogleSTTService, GoogleTTSService
+from pipecat.vad.silero import SileroVADAnalyzer
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketTransport, FastAPIWebsocketParams
+from pipecat.transports.network.websocket_server import WebsocketServerParams
 
 # Load environment variables
 load_dotenv(override=True)
@@ -42,57 +59,58 @@ structlog.configure(
 logger = structlog.get_logger()
 
 @dataclass
-class ConnectionInfo:
-    """Track individual connection information"""
-    client_id: str
-    websocket: WebSocket
-    connected_at: float
+class SessionInfo:
+    """Track individual session information for capacity management"""
+    session_id: str
+    created_at: float
     last_activity: float
+    transport_type: str
     user_agent: Optional[str] = None
     ip_address: Optional[str] = None
+    pipeline_task: Optional[PipelineTask] = None
 
 @dataclass
 class ServerMetrics:
     """Track server performance metrics"""
-    total_connections: int = 0
-    active_connections: int = 0
-    peak_connections: int = 0
-    rejected_connections: int = 0
+    total_sessions: int = 0
+    active_sessions: int = 0
+    peak_sessions: int = 0
+    rejected_sessions: int = 0
     avg_session_duration: float = 0
     
     def update_peak(self, current: int):
-        self.peak_connections = max(self.peak_connections, current)
+        self.peak_sessions = max(self.peak_sessions, current)
     
-    def add_connection(self):
-        self.total_connections += 1
-        self.active_connections += 1
-        self.update_peak(self.active_connections)
+    def add_session(self):
+        self.total_sessions += 1
+        self.active_sessions += 1
+        self.update_peak(self.active_sessions)
     
-    def remove_connection(self, duration: float):
-        self.active_connections = max(0, self.active_connections - 1)
+    def remove_session(self, duration: float):
+        self.active_sessions = max(0, self.active_sessions - 1)
         # Update rolling average session duration
         if self.avg_session_duration == 0:
             self.avg_session_duration = duration
         else:
             self.avg_session_duration = (self.avg_session_duration * 0.9) + (duration * 0.1)
 
-class ConnectionManager:
-    """Manage WebSocket connections with limits and monitoring"""
+class SessionManager:
+    """Lightweight session tracking that doesn't interfere with Pipecat's transport handling"""
     
     def __init__(self):
-        self.max_connections = int(os.getenv("MAX_CONNECTIONS", "25"))
-        self.connection_timeout = int(os.getenv("CONNECTION_TIMEOUT", "300"))  # 5 minutes
-        self.connections: Dict[str, ConnectionInfo] = {}
+        self.max_sessions = int(os.getenv("MAX_SESSIONS", "25"))
+        self.session_timeout = int(os.getenv("SESSION_TIMEOUT", "300"))  # 5 minutes
+        self.sessions: Dict[str, SessionInfo] = {}
         self.metrics = ServerMetrics()
         self._cleanup_task: Optional[asyncio.Task] = None
         
     async def start(self):
-        """Start the connection manager"""
+        """Start the session manager"""
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
-        logger.info("Connection manager started", max_connections=self.max_connections)
+        logger.info("Session manager started", max_sessions=self.max_sessions)
     
     async def stop(self):
-        """Stop the connection manager"""
+        """Stop the session manager"""
         if self._cleanup_task:
             self._cleanup_task.cancel()
             try:
@@ -100,131 +118,129 @@ class ConnectionManager:
             except asyncio.CancelledError:
                 pass
         
-        # Close all connections
-        for client_id in list(self.connections.keys()):
-            await self.disconnect(client_id)
+        # Stop all active pipeline tasks
+        for session_id in list(self.sessions.keys()):
+            await self.end_session(session_id)
         
-        logger.info("Connection manager stopped")
+        logger.info("Session manager stopped")
     
-    async def connect(self, websocket: WebSocket) -> Optional[str]:
-        """Attempt to connect a new client"""
-        # Check capacity
-        if len(self.connections) >= self.max_connections:
-            self.metrics.rejected_connections += 1
-            logger.warning("Connection rejected - server at capacity",
-                         active_connections=len(self.connections),
-                         max_connections=self.max_connections)
-            await websocket.close(code=1008, reason="Server at capacity")
-            return None
+    def can_accept_session(self) -> bool:
+        """Check if we can accept a new session"""
+        return len(self.sessions) < self.max_sessions
+    
+    def register_session(self, session_id: str, transport_type: str, 
+                        pipeline_task: Optional[PipelineTask] = None,
+                        ip_address: Optional[str] = None) -> bool:
+        """Register a new session"""
+        if not self.can_accept_session():
+            self.metrics.rejected_sessions += 1
+            logger.warning("Session rejected - server at capacity",
+                         active_sessions=len(self.sessions),
+                         max_sessions=self.max_sessions)
+            return False
         
-        # Generate client ID
-        client_id = str(uuid.uuid4())
-        
-        # Accept connection
-        await websocket.accept()
-        
-        # Store connection info
         current_time = time.time()
-        connection_info = ConnectionInfo(
-            client_id=client_id,
-            websocket=websocket,
-            connected_at=current_time,
+        session_info = SessionInfo(
+            session_id=session_id,
+            created_at=current_time,
             last_activity=current_time,
-            ip_address=websocket.client.host if websocket.client else None
+            transport_type=transport_type,
+            ip_address=ip_address,
+            pipeline_task=pipeline_task
         )
         
-        self.connections[client_id] = connection_info
-        self.metrics.add_connection()
+        self.sessions[session_id] = session_info
+        self.metrics.add_session()
         
-        logger.info("Client connected",
-                   client_id=client_id,
-                   ip_address=connection_info.ip_address,
-                   active_connections=len(self.connections))
+        logger.info("Session registered",
+                   session_id=session_id,
+                   transport_type=transport_type,
+                   ip_address=ip_address,
+                   active_sessions=len(self.sessions))
         
-        return client_id
+        return True
     
-    async def disconnect(self, client_id: str):
-        """Disconnect a client and clean up"""
-        if client_id not in self.connections:
+    async def end_session(self, session_id: str):
+        """End a session and clean up"""
+        if session_id not in self.sessions:
             return
         
-        connection_info = self.connections[client_id]
-        session_duration = time.time() - connection_info.connected_at
+        session_info = self.sessions[session_id]
+        session_duration = time.time() - session_info.created_at
         
-        # Close WebSocket if still open (refined state check per FastAPI/Starlette)
-        try:
-            if connection_info.websocket.client_state != WebSocketState.DISCONNECTED:
-                await connection_info.websocket.close()
-        except Exception as e:
-            logger.debug("Error closing WebSocket", client_id=client_id, error=str(e))
+        # Stop pipeline task if exists
+        if session_info.pipeline_task:
+            try:
+                await session_info.pipeline_task.stop()
+            except Exception as e:
+                logger.debug("Error stopping pipeline task", session_id=session_id, error=str(e))
         
-        # Remove from connections
-        del self.connections[client_id]
-        self.metrics.remove_connection(session_duration)
+        # Remove from sessions
+        del self.sessions[session_id]
+        self.metrics.remove_session(session_duration)
         
-        logger.info("Client disconnected",
-                   client_id=client_id,
+        logger.info("Session ended",
+                   session_id=session_id,
                    session_duration=f"{session_duration:.2f}s",
-                   active_connections=len(self.connections))
+                   active_sessions=len(self.sessions))
     
-    def update_activity(self, client_id: str):
-        """Update last activity for a connection"""
-        if client_id in self.connections:
-            self.connections[client_id].last_activity = time.time()
+    def update_activity(self, session_id: str):
+        """Update last activity for a session"""
+        if session_id in self.sessions:
+            self.sessions[session_id].last_activity = time.time()
     
-    def get_connection(self, client_id: str) -> Optional[ConnectionInfo]:
-        """Get connection info"""
-        return self.connections.get(client_id)
+    def get_session(self, session_id: str) -> Optional[SessionInfo]:
+        """Get session info"""
+        return self.sessions.get(session_id)
     
     async def _periodic_cleanup(self):
-        """Periodic cleanup of stale connections"""
+        """Periodic cleanup of stale sessions"""
         while True:
             try:
                 await asyncio.sleep(60)  # Check every minute
-                await self._cleanup_stale_connections()
+                await self._cleanup_stale_sessions()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Cleanup error", error=str(e))
     
-    async def _cleanup_stale_connections(self):
-        """Clean up connections that haven't been active"""
+    async def _cleanup_stale_sessions(self):
+        """Clean up sessions that haven't been active"""
         current_time = time.time()
-        stale_clients = []
+        stale_sessions = []
         
-        for client_id, conn_info in self.connections.items():
-            if current_time - conn_info.last_activity > self.connection_timeout:
-                stale_clients.append(client_id)
+        for session_id, session_info in self.sessions.items():
+            if current_time - session_info.last_activity > self.session_timeout:
+                stale_sessions.append(session_id)
         
-        for client_id in stale_clients:
-            logger.info("Cleaning up stale connection", client_id=client_id)
-            await self.disconnect(client_id)
+        for session_id in stale_sessions:
+            logger.info("Cleaning up stale session", session_id=session_id)
+            await self.end_session(session_id)
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get current server metrics"""
-        # Calculate capacity usage with safe division [docs.python.org](https://docs.python.org/3/library/stdtypes.html)
         capacity_pct = 0.0
-        if self.max_connections > 0:
-            capacity_pct = (self.metrics.active_connections / self.max_connections) * 100
+        if self.max_sessions > 0:
+            capacity_pct = (self.metrics.active_sessions / self.max_sessions) * 100
         
         return {
-            "connections": {
-                "total": self.metrics.total_connections,
-                "active": self.metrics.active_connections,
-                "peak": self.metrics.peak_connections,
-                "rejected": self.metrics.rejected_connections,
+            "sessions": {
+                "total": self.metrics.total_sessions,
+                "active": self.metrics.active_sessions,
+                "peak": self.metrics.peak_sessions,
+                "rejected": self.metrics.rejected_sessions,
                 "capacity_used": f"{capacity_pct:.1f}%"
             },
             "performance": {
                 "avg_session_duration": f"{self.metrics.avg_session_duration:.2f}s",
-                "max_connections": self.max_connections,
-                "connection_timeout": self.connection_timeout
+                "max_sessions": self.max_sessions,
+                "session_timeout": self.session_timeout
             },
             "timestamp": time.time()
         }
 
-# Global connection manager
-connection_manager = ConnectionManager()
+# Global session manager
+session_manager = SessionManager()
 
 # Import authentication routers
 from api.auth import router as auth_router, user_router
@@ -232,14 +248,7 @@ from api.auth import router as auth_router, user_router
 # Import agents router  
 from api.agents import router as agents_router
 
-# Import flexible conversation functions
-from bot.flexible_conversation import create_voice_conversation, create_text_conversation, create_hybrid_conversation
-
-# Import transport factory for simplified transport management
-from transports.factory import TransportFactory
-from transports.base import TransportType
-
-# Pydantic models for chat
+# Pydantic models
 class TextChatRequest(BaseModel):
     message: str
     agent_id: Optional[int] = None
@@ -251,28 +260,167 @@ class TextChatResponse(BaseModel):
     agent_id: Optional[int] = None
     timestamp: float
 
-# NEW: For WebRTC SDP offer (integrates with your WebRTC manager)
 class WebRTCOffer(BaseModel):
     sdp: str
     type: str = "offer"
+
+# Custom processor for activity tracking
+class ActivityTracker(FrameProcessor):
+    def __init__(self, session_id: str, session_manager: SessionManager):
+        super().__init__()
+        self.session_id = session_id
+        self.session_manager = session_manager
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        # Update activity on any frame
+        self.session_manager.update_activity(self.session_id)
+        await self.push_frame(frame, direction)
+
+# Import the conversation functions from flexible_conversation
+from bot.flexible_conversation import (
+    create_websocket_voice_conversation,
+    create_websocket_text_conversation,
+    create_webrtc_voice_conversation,
+    create_webrtc_text_conversation
+)
+
+async def create_pipecat_voice_conversation(
+    websocket: WebSocket,
+    agent_id: Optional[int] = None,
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a voice conversation using the updated flexible conversation architecture"""
+    
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
+    # Register session first
+    if not session_manager.register_session(
+        session_id, 
+        "websocket_voice",
+        ip_address=websocket.client.host if websocket.client else None
+    ):
+        await websocket.close(code=1008, reason="Server at capacity")
+        return
+    
+    try:
+        # Create STT service
+        stt = GoogleSTTService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            language="en-US"
+        )
+        
+        # Create TTS service
+        tts = GoogleTTSService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            voice_id="en-US-Neural2-A"
+        )
+        
+        # Create LLM service
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4o-mini"
+        )
+        
+        # Create activity tracker
+        activity_tracker = ActivityTracker(session_id, session_manager)
+        
+        # Use the flexible conversation function
+        task = await create_websocket_voice_conversation(
+            websocket=websocket,
+            stt=stt,
+            llm=llm,
+            tts=tts,
+            system_prompt=system_prompt or "You are a helpful voice assistant. Keep responses concise and natural for voice interaction.",
+            activity_tracker=activity_tracker
+        )
+        
+        # Update session with pipeline task
+        session_info = session_manager.get_session(session_id)
+        if session_info:
+            session_info.pipeline_task = task
+        
+        # Run the pipeline
+        await task.run()
+        
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected", session_id=session_id)
+    except Exception as e:
+        logger.error("Voice conversation error", session_id=session_id, error=str(e))
+    finally:
+        await session_manager.end_session(session_id)
+
+async def create_pipecat_text_conversation(
+    websocket: WebSocket,
+    agent_id: Optional[int] = None,
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None
+):
+    """Create a text-only conversation using flexible conversation architecture"""
+    
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
+    # Register session first
+    if not session_manager.register_session(
+        session_id, 
+        "websocket_text",
+        ip_address=websocket.client.host if websocket.client else None
+    ):
+        await websocket.close(code=1008, reason="Server at capacity")
+        return
+    
+    try:
+        # Create LLM service
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4o-mini"
+        )
+        
+        # Create activity tracker
+        activity_tracker = ActivityTracker(session_id, session_manager)
+        
+        # Use the flexible conversation function
+        task = await create_websocket_text_conversation(
+            websocket=websocket,
+            llm=llm,
+            system_prompt=system_prompt or "You are a helpful text-based assistant.",
+            activity_tracker=activity_tracker
+        )
+        
+        # Update session with pipeline task
+        session_info = session_manager.get_session(session_id)
+        if session_info:
+            session_info.pipeline_task = task
+        
+        # Run the pipeline
+        await task.run()
+        
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected", session_id=session_id)
+    except Exception as e:
+        logger.error("Text conversation error", session_id=session_id, error=str(e))
+    finally:
+        await session_manager.end_session(session_id)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan"""
     # Startup
-    await connection_manager.start()
+    await session_manager.start()
     logger.info("Application started")
     
     yield
     
     # Shutdown
-    await connection_manager.stop()
+    await session_manager.stop()
     logger.info("Application shut down")
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Voice Agent Server",
-    description="Enhanced server with connection management",
+    description="Enhanced server with Pipecat native transport integration",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -299,29 +447,20 @@ from fastapi import Depends
 @app.get("/session-manager/stats")
 async def get_session_manager_stats(current_user: User = Depends(get_current_user)):
     """Get session manager statistics"""
-    return {
-        "session_manager": {
-            "total_sessions": connection_manager.metrics.total_connections,
-            "active_sessions": connection_manager.metrics.active_connections,
-            "peak_sessions": connection_manager.metrics.peak_connections,
-            "avg_session_duration": connection_manager.metrics.avg_session_duration
-        },
-        "active_connections": connection_manager.metrics.active_connections,
-        "server_capacity": connection_manager.max_connections,
-        "capacity_usage": f"{(connection_manager.metrics.active_connections / connection_manager.max_connections) * 100:.1f}%" if connection_manager.max_connections > 0 else "0.0%"
-    }
+    return session_manager.get_metrics()
 
 @app.get("/session-manager/sessions")
 async def get_sessions(current_user: User = Depends(get_current_user)):
     """Get current sessions"""
     sessions = []
-    for client_id, connection_info in connection_manager.connections.items():
+    for session_id, session_info in session_manager.sessions.items():
         sessions.append({
-            "session_id": client_id,
-            "connected_at": connection_info.connected_at,
-            "last_activity": connection_info.last_activity,
-            "duration": time.time() - connection_info.connected_at,
-            "ip_address": connection_info.ip_address
+            "session_id": session_id,
+            "created_at": session_info.created_at,
+            "last_activity": session_info.last_activity,
+            "duration": time.time() - session_info.created_at,
+            "transport_type": session_info.transport_type,
+            "ip_address": session_info.ip_address
         })
     return sessions
 
@@ -330,156 +469,74 @@ async def websocket_endpoint(
     websocket: WebSocket,
     token: Optional[str] = None,
     agent_id: Optional[int] = None,
-    voice_input: bool = True,
-    voice_output: bool = True,
-    system_prompt: Optional[str] = None
+    mode: str = "voice"  # "voice" or "text"
 ):
-    """Simplified WebSocket endpoint using conversation functions directly"""
-    # Don't use connection manager for this - let Pipecat handle it
+    """Unified WebSocket endpoint using Pipecat's native transport system"""
     
     # TODO: Add authentication validation with token
     
+    session_id = str(uuid.uuid4())
+    
     try:
-        # Delegate to appropriate conversation function
-        if voice_input and voice_output:
-            await create_voice_conversation(
+        if mode == "voice":
+            await create_pipecat_voice_conversation(
                 websocket=websocket,
                 agent_id=agent_id,
-                session_id=str(uuid.uuid4()),
-                system_prompt=system_prompt
+                session_id=session_id
             )
-        elif not voice_input and not voice_output:
-            await create_text_conversation(
+        elif mode == "text":
+            await create_pipecat_text_conversation(
                 websocket=websocket,
                 agent_id=agent_id,
-                session_id=str(uuid.uuid4()),
-                system_prompt=system_prompt
+                session_id=session_id
             )
         else:
-            await create_hybrid_conversation(
-                websocket=websocket,
-                agent_id=agent_id,
-                session_id=str(uuid.uuid4()),
-                system_prompt=system_prompt
-            )
+            await websocket.close(code=1008, reason="Invalid mode")
         
-        logger.info("WebSocket conversation completed")
+        logger.info("WebSocket conversation completed", session_id=session_id)
         
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected normally")
+        logger.info("WebSocket disconnected normally", session_id=session_id)
     except Exception as e:
-        logger.error("WebSocket error", error=str(e))
-
-# NEW: WebRTC offer endpoint with adaptive transport management
-@app.post("/webrtc/offer")
-async def webrtc_offer(
-    request: Request,
-    offer: WebRTCOffer,
-    transport_type: str = "small_webrtc",  # Ensure it's WebRTC
-    token: Optional[str] = None,
-    agent_id: Optional[int] = None,
-    voice_input: bool = True,
-    text_input: bool = True,
-    voice_output: bool = True,
-    text_output: bool = True,
-    enable_interruptions: bool = True
-):
-    if transport_type != "small_webrtc":
-        raise HTTPException(status_code=400, detail="Invalid transport type for this endpoint")
-    
-    # Capacity check
-    if connection_manager.metrics.active_connections >= connection_manager.max_connections:
-        raise HTTPException(status_code=503, detail="Server at capacity")
-    
-    client_id = str(uuid.uuid4())  # Generate session ID
-    
-    try:
-        # Extract headers for adaptive transport detection
-        headers = dict(request.headers)
-        
-        # Configure initial mode
-        initial_mode = FlexibleConversationMode(
-            voice_input=voice_input,
-            text_input=text_input,
-            voice_output=voice_output,
-            text_output=text_output,
-            enable_interruptions=enable_interruptions
-        )
-        
-        # Validate mode
-        if not initial_mode.validate():
-            raise HTTPException(status_code=400, detail="Invalid mode configuration")
-        
-        # Create adaptive transport manager (WebRTC for this endpoint)
-        transport_manager = TransportFactory.create_adaptive_transport_manager(
-            request_headers=headers,
-            transport_type=TransportType.WEBRTC,  # Force WebRTC for this endpoint
-            audio_in_enabled=voice_input,
-            audio_out_enabled=voice_output,
-            enable_vad=voice_input,
-            enable_interruptions=enable_interruptions
-        )
-        
-        # Create session through transport manager with SDP data
-        session_info = await transport_manager.create_session(
-            session_id=client_id,
-            client_sdp=offer.sdp,
-            sdp_type=offer.type,
-            mode=initial_mode
-        )
-        
-        # Get SDP answer from the session
-        answer = await transport_manager.get_session_answer(client_id)
-        if not answer:
-            raise HTTPException(status_code=500, detail="Failed to generate SDP answer")
-        
-        logger.info("WebRTC session created via transport manager", 
-                   session_id=client_id, 
-                   transport_type="webrtc")
-        
-        return {"sdp": answer["sdp"], "type": answer["type"]}
-        
-    except Exception as e:
-        logger.error("WebRTC offer error", client_id=client_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"WebRTC session creation failed: {str(e)}")
+        logger.error("WebSocket error", session_id=session_id, error=str(e))
 
 @app.post("/connect")
 async def bot_connect(request: Request) -> Dict[Any, Any]:
     """Connect endpoint with capacity checking"""
-    metrics = connection_manager.get_metrics()
     
-    # Check if server is at capacity
-    if metrics["connections"]["active"] >= connection_manager.max_connections:
+    # Check if server can accept new sessions
+    if not session_manager.can_accept_session():
+        metrics = session_manager.get_metrics()
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "Server at capacity",
                 "message": "Please try again later",
-                "capacity_info": metrics["connections"]
+                "capacity_info": metrics["sessions"]
             }
         )
     
-    # Always point to the unified WebSocket endpoint
+    # Return WebSocket URL
     ws_url = "ws://localhost:7860/ws"
     
     return {
         "ws_url": ws_url,
         "status": "available",
         "capacity": {
-            "available_slots": connection_manager.max_connections - metrics["connections"]["active"],
-            "total_capacity": connection_manager.max_connections
+            "available_slots": session_manager.max_sessions - session_manager.metrics.active_sessions,
+            "total_capacity": session_manager.max_sessions
         }
     }
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    metrics = connection_manager.get_metrics()
+    metrics = session_manager.get_metrics()
     
     # Determine health status
     capacity_used = 0.0
-    if connection_manager.max_connections > 0:
-        capacity_used = (metrics["connections"]["active"] / connection_manager.max_connections)
+    if session_manager.max_sessions > 0:
+        capacity_used = (session_manager.metrics.active_sessions / session_manager.max_sessions)
     
     if capacity_used >= 0.9:
         status = "warning"
@@ -492,16 +549,16 @@ async def health_check():
         "status": status,
         "timestamp": time.time(),
         "server_info": {
-            "active_connections": metrics["connections"]["active"],
-            "max_connections": connection_manager.max_connections,
-            "capacity_usage": metrics["connections"]["capacity_used"]
+            "active_sessions": session_manager.metrics.active_sessions,
+            "max_sessions": session_manager.max_sessions,
+            "capacity_usage": metrics["sessions"]["capacity_used"]
         }
     }
 
 @app.get("/metrics")
 async def get_metrics():
     """Detailed metrics endpoint"""
-    return connection_manager.get_metrics()
+    return session_manager.get_metrics()
 
 @app.get("/")
 async def root():
@@ -510,34 +567,32 @@ async def root():
         "service": "Voice Agent Server",
         "version": "1.0.0",
         "status": "running",
-        "message": "Voice Agent Server",
+        "message": "Voice Agent Server with Pipecat Native Transport",
         "features": [
             "authentication",
-            "user_management",
+            "user_management", 
             "agent_management",
             "voice_processing",
             "websocket_support",
-            "webrtc_support",
-            "multi_agent_conversations",
-            "flexible_conversation_modes",
-            "adaptive_transport_management"
+            "pipecat_native_transport",
+            "session_capacity_management",
+            "activity_tracking"
         ]
     }
 
 async def main():
     """Main function with optimized configuration"""
     try:
-        # Optimized uvicorn configuration (suggest Gunicorn for production scaling [mangum.io](https://mangum.io/deploying-asgi-applications-best-practices-and-tools/))
         config = uvicorn.Config(
             app,
             host="0.0.0.0",
             port=int(os.getenv("PORT", "7860")),
-            loop="asyncio",  # Explicit asyncio loop [docs.python.org](https://docs.python.org/3/library/asyncio.html)
+            loop="asyncio",
             ws_max_size=16 * 1024 * 1024,  # 16MB max message size
             ws_ping_interval=20,           # Ping every 20 seconds
             ws_ping_timeout=10,            # Ping timeout 10 seconds
             timeout_keep_alive=30,         # Keep-alive timeout
-            limit_concurrency=connection_manager.max_connections,
+            limit_concurrency=session_manager.max_sessions,
             access_log=False,              # Disable for performance
             log_level="info"
         )
@@ -545,13 +600,13 @@ async def main():
         server = uvicorn.Server(config)
         
         logger.info("Server starting",
-                   max_connections=connection_manager.max_connections,
+                   max_sessions=session_manager.max_sessions,
                    port=int(os.getenv("PORT", "7860")))
         
         await server.serve()
         
-    except* Exception as exc_group:  # Fine-grained exceptions [docs.python.org](https://docs.python.org/3/contents.html)
-        logger.error("Server error", error=str(exc_group))
+    except Exception as e:
+        logger.error("Server error", error=str(e))
         raise
 
 if __name__ == "__main__":
