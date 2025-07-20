@@ -4,7 +4,7 @@ Simplified WebSocket Transport Manager - thin wrapper following Pipecat best pra
 """
 
 import uuid
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import WebSocket, WebSocketDisconnect
 import structlog
 from pipecat.pipeline.runner import PipelineRunner
@@ -74,7 +74,12 @@ class WebSocketTransportManager(BaseTransportManager):
             # Now run the pipeline task with a runner
             if pipeline_task:
                 runner = PipelineRunner(handle_sigint=False)
-                logger.info("Starting pipeline", session_id=session_id)
+                logger.info(
+                    "Starting WebSocket pipeline", 
+                    session_id=session_id, 
+                    agent_id=agent_id,
+                    voice_enabled=voice_input and voice_output
+                )
                 await runner.run(pipeline_task)
         
         except WebSocketDisconnect:
@@ -91,8 +96,8 @@ class WebSocketTransportManager(BaseTransportManager):
             # Clean up resources
             if pipeline_task:
                 try:
-                    await pipeline_task.stop()
-                    logger.info("Pipeline stopped", session_id=session_id)
+                    await pipeline_task.cancel()
+                    logger.info("Pipeline cancelled", session_id=session_id)
                 except Exception as cleanup_error:
                     logger.debug("Pipeline cleanup error", session_id=session_id, error=str(cleanup_error))
             
@@ -106,3 +111,11 @@ class WebSocketTransportManager(BaseTransportManager):
     async def destroy_session(self, session_id: str) -> None:
         """Not needed - handled automatically by conversation functions"""
         pass
+    
+    async def send_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Send a message to a WebSocket session - not implemented for simplified manager"""
+        logger.warning("WebSocket manager does not support send_message - use WebSocket directly", session_id=session_id)
+    
+    async def handle_client_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Handle a message from a WebSocket client - not implemented for simplified manager"""
+        logger.debug("WebSocket manager handle_client_message called", session_id=session_id, message_type=message.get('type', 'unknown'))

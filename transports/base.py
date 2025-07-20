@@ -118,6 +118,7 @@ class SessionInfo:
     context: OpenAILLMContext
     pipeline: Optional[Pipeline] = None
     task: Optional[PipelineTask] = None
+    pipeline_task: Optional[PipelineTask] = None  # For compatibility
     runner: Optional[PipelineRunner] = None
     transport: Optional[BaseTransport] = None
     created_at: datetime = None

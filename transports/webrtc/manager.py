@@ -33,6 +33,16 @@ class WebRTCTransportManager(BaseTransportManager):
         
     async def create_session(self, session_id: str, **kwargs) -> SessionInfo:
         """Create a new WebRTC session - simplified to delegate to conversation functions"""
+        # Check concurrent session limits
+        max_sessions = getattr(self.config, 'max_concurrent_sessions', 10)
+        if len(self.active_sessions) >= max_sessions:
+            logger.warning(
+                "Maximum concurrent sessions reached", 
+                active_sessions=len(self.active_sessions),
+                max_sessions=max_sessions
+            )
+            raise RuntimeError(f"Maximum concurrent sessions ({max_sessions}) reached")
+        
         # Get WebRTC signaling data from client
         client_sdp = kwargs.get('client_sdp')
         sdp_type = kwargs.get('sdp_type', 'offer')
@@ -85,10 +95,16 @@ class WebRTCTransportManager(BaseTransportManager):
                 )
             
             # Store the pipeline task in session info
+            from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+            
+            # Create a simple context for the session info
+            context = OpenAILLMContext([{"role": "system", "content": system_prompt or "You are a helpful AI assistant."}])
+            
             session_info = SessionInfo(
                 session_id=session_id,
                 transport_type=TransportType.WEBRTC,
                 config=self.config,
+                context=context,
                 transport=transport,
                 pipeline_task=pipeline_task
             )
@@ -101,10 +117,15 @@ class WebRTCTransportManager(BaseTransportManager):
                 # Start the pipeline in a background task so we can return the session info
                 async def run_with_cleanup():
                     try:
-                        logger.info("Starting WebRTC pipeline", session_id=session_id)
+                        logger.info(
+                            "Starting WebRTC pipeline", 
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            voice_enabled=voice_input and voice_output
+                        )
                         await runner.run(pipeline_task)
                     except Exception as e:
-                        logger.error("WebRTC pipeline error", session_id=session_id, error=str(e))
+                        logger.error("WebRTC pipeline error", session_id=session_id, error=str(e), exc_info=True)
                         # Clean up session on pipeline error
                         await self.destroy_session(session_id)
                     finally:
@@ -125,38 +146,113 @@ class WebRTCTransportManager(BaseTransportManager):
             raise
     
     async def destroy_session(self, session_id: str) -> None:
-        """Not needed - handled automatically by conversation functions"""
+        """Destroy a WebRTC session and clean up resources"""
         if session_id in self.active_sessions:
+            session_info = self.active_sessions[session_id]
+            
+            # Stop the pipeline task if it exists
+            if session_info.pipeline_task:
+                try:
+                    await session_info.pipeline_task.cancel()
+                    logger.debug("Pipeline task cancelled", session_id=session_id)
+                except Exception as e:
+                    logger.debug("Error cancelling pipeline task", session_id=session_id, error=str(e))
+            
+            # Clean up transport resources
+            if hasattr(session_info.transport, 'webrtc_connection'):
+                try:
+                    # Close WebRTC connection if needed
+                    await session_info.transport.webrtc_connection.close()
+                except Exception as e:
+                    logger.debug("Error closing WebRTC connection", session_id=session_id, error=str(e))
+            
             del self.active_sessions[session_id]
             logger.info("WebRTC session destroyed", session_id=session_id)
     
     async def get_session_answer(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get the SDP answer for a WebRTC session"""
+        """Get the SDP answer for a WebRTC session with proper connection handling"""
         session_info = self.get_session(session_id)
         if not session_info or not session_info.transport:
+            logger.warning("Session not found or no transport", session_id=session_id)
             return None
         
         try:
             if hasattr(session_info.transport, 'webrtc_connection'):
-                # Wait for answer with timeout
-                answer = None
-                timeout_seconds = 10
-                for _ in range(timeout_seconds * 10):  # Check every 100ms
-                    answer = session_info.transport.webrtc_connection.get_answer()
-                    if answer:
-                        break
-                    await asyncio.sleep(0.1)
+                webrtc_connection = session_info.transport.webrtc_connection
                 
-                if not answer:
-                    raise TimeoutError("SDP answer timeout")
-                return answer
+                # Check if connection is active
+                if not webrtc_connection.is_connected():
+                    logger.error("WebRTC connection not established", session_id=session_id)
+                    return None
+                
+                # Get answer from the connection
+                answer = webrtc_connection.get_answer()
+                if answer:
+                    logger.info("WebRTC answer retrieved successfully", session_id=session_id)
+                    return answer
+                else:
+                    logger.error("No SDP answer available from WebRTC connection", session_id=session_id)
+                    return None
                 
         except Exception as e:
             logger.error(
                 "Error getting WebRTC session answer",
                 session_id=session_id,
-                error=str(e)
+                error=str(e),
+                exc_info=True
             )
         
         return None
+    
+    async def send_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Send a message to a WebRTC session"""
+        session_info = self.get_session(session_id)
+        if not session_info or not session_info.pipeline_task:
+            logger.warning("Cannot send message - session not found or inactive", session_id=session_id)
+            return
+        
+        try:
+            # Convert message to appropriate frame and queue it
+            from pipecat.frames.frames import TextFrame, LLMMessagesFrame
+            
+            if 'text' in message:
+                frame = TextFrame(text=message['text'])
+                await session_info.pipeline_task.queue_frames([frame])
+            elif 'messages' in message:
+                frame = LLMMessagesFrame(messages=message['messages'])
+                await session_info.pipeline_task.queue_frames([frame])
+            else:
+                logger.warning("Unknown message format", session_id=session_id, message_keys=list(message.keys()))
+                
+        except Exception as e:
+            logger.error("Error sending message to WebRTC session", session_id=session_id, error=str(e))
+    
+    async def handle_client_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Handle a message from a WebRTC client"""
+        session_info = self.get_session(session_id)
+        if not session_info:
+            logger.warning("Cannot handle message - session not found", session_id=session_id)
+            return
+        
+        try:
+            # Update session activity
+            self.update_session_activity(session_id)
+            
+            # For WebRTC, client messages are typically handled through the transport's data channels
+            # or via the pipeline's audio/video streams. This method can be used for control messages.
+            message_type = message.get('type', 'unknown')
+            
+            if message_type == 'ping':
+                # Respond to ping with pong
+                await self.send_message(session_id, {'type': 'pong', 'timestamp': message.get('timestamp')})
+            elif message_type == 'control':
+                # Handle control messages (pause, resume, etc.)
+                control_action = message.get('action')
+                logger.info("WebRTC control message received", session_id=session_id, action=control_action)
+                # Control actions would be implemented based on requirements
+            else:
+                logger.debug("Unhandled client message type", session_id=session_id, message_type=message_type)
+                
+        except Exception as e:
+            logger.error("Error handling client message", session_id=session_id, error=str(e))
     

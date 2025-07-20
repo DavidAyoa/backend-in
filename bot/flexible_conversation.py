@@ -26,10 +26,7 @@ from pipecat.transports.network.fastapi_websocket import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
-from pipecat.transports.network.small_webrtc import (
-    SmallWebRTCTransport,
-    SmallWebRTCTransportParams,
-)
+from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
 from pipecat.frames.frames import (
     Frame, TranscriptionFrame, LLMMessagesFrame
 )
@@ -128,14 +125,27 @@ class PipecatConversationBot:
         return task
     
     def _create_pipeline_task(self, pipeline: Pipeline, bot_config: BotConfig) -> PipelineTask:
-        """Create pipeline task with appropriate parameters"""
+        """Create pipeline task with appropriate parameters following Pipecat best practices"""
         task_params = PipelineParams(
             allow_interruptions=bot_config.enable_interruptions,
             enable_metrics=getattr(config, 'ENABLE_METRICS', False),
             enable_usage_metrics=getattr(config, 'ENABLE_METRICS', False),
+            # Audio processing configuration
+            audio_in_sample_rate=16000,  # Standard sample rate for STT services
+            audio_out_sample_rate=24000,  # Higher quality for TTS output
         )
         
-        return PipelineTask(pipeline, params=task_params)
+        return PipelineTask(
+            pipeline, 
+            params=task_params,
+            # Idle detection configuration - 5 minutes timeout
+            idle_timeout_secs=300,
+            cancel_on_idle_timeout=True,
+            # Enable checking for dangling tasks
+            check_dangling_tasks=True,
+            # Conversation ID for tracking
+            conversation_id=bot_config.session_id
+        )
     
     async def _create_transport(self, transport_or_websocket, bot_config: BotConfig):
         """Create transport with appropriate configuration"""
@@ -217,6 +227,20 @@ class PipecatConversationBot:
         @transport.event_handler("on_participant_left")
         async def on_participant_left(transport, participant, reason):
             slog.info("Participant left", session_id=bot_config.session_id, reason=reason)
+            # Gracefully end the task when participant leaves
+            await task.stop_when_done()
+        
+        @transport.event_handler("on_client_disconnected")
+        async def on_client_disconnected(transport, client):
+            slog.info("Client disconnected", session_id=bot_config.session_id)
+            # Immediately cancel on disconnect
+            await task.cancel()
+        
+        @transport.event_handler("on_client_closed")
+        async def on_client_closed(transport, client):
+            slog.info("Client connection closed", session_id=bot_config.session_id)
+            # Immediately cancel on close
+            await task.cancel()
 
 # Simplified factory functions - Return tasks, don't run them
 async def create_websocket_voice_conversation(

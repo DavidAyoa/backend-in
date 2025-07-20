@@ -31,9 +31,10 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.frames.frames import Frame, AudioRawFrame, TextFrame
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.openai import OpenAILLMService
-from pipecat.services.google import GoogleSTTService, GoogleTTSService
-from pipecat.vad.silero import SileroVADAnalyzer
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.google.stt import GoogleSTTService
+from pipecat.services.google.tts import GoogleTTSService
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.transports.network.websocket_server import WebsocketServerParams
@@ -168,12 +169,12 @@ class SessionManager:
         session_info = self.sessions[session_id]
         session_duration = time.time() - session_info.created_at
         
-        # Stop pipeline task if exists
+        # Cancel pipeline task if exists
         if session_info.pipeline_task:
             try:
-                await session_info.pipeline_task.stop()
+                await session_info.pipeline_task.cancel()
             except Exception as e:
-                logger.debug("Error stopping pipeline task", session_id=session_id, error=str(e))
+                logger.debug("Error cancelling pipeline task", session_id=session_id, error=str(e))
         
         # Remove from sessions
         del self.sessions[session_id]
@@ -284,6 +285,14 @@ from bot.flexible_conversation import (
     create_webrtc_text_conversation
 )
 
+# Import WebRTC transport manager
+from transports.webrtc.manager import WebRTCTransportManager
+from transports.base import TransportConfig, TransportType
+
+# Global WebRTC transport manager
+webrtc_config = TransportConfig(transport_type=TransportType.WEBRTC)
+webrtc_manager = WebRTCTransportManager(webrtc_config)
+
 async def create_pipecat_voice_conversation(
     websocket: WebSocket,
     agent_id: Optional[int] = None,
@@ -305,35 +314,12 @@ async def create_pipecat_voice_conversation(
         return
     
     try:
-        # Create STT service
-        stt = GoogleSTTService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            language="en-US"
-        )
-        
-        # Create TTS service
-        tts = GoogleTTSService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            voice_id="en-US-Neural2-A"
-        )
-        
-        # Create LLM service
-        llm = OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4o-mini"
-        )
-        
-        # Create activity tracker
-        activity_tracker = ActivityTracker(session_id, session_manager)
-        
-        # Use the flexible conversation function
+        # Use the flexible conversation function (it creates its own services)
         task = await create_websocket_voice_conversation(
             websocket=websocket,
-            stt=stt,
-            llm=llm,
-            tts=tts,
-            system_prompt=system_prompt or "You are a helpful voice assistant. Keep responses concise and natural for voice interaction.",
-            activity_tracker=activity_tracker
+            agent_id=agent_id,
+            session_id=session_id,
+            system_prompt=system_prompt or "You are a helpful voice assistant. Keep responses concise and natural for voice interaction."
         )
         
         # Update session with pipeline task
@@ -372,21 +358,12 @@ async def create_pipecat_text_conversation(
         return
     
     try:
-        # Create LLM service
-        llm = OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4o-mini"
-        )
-        
-        # Create activity tracker
-        activity_tracker = ActivityTracker(session_id, session_manager)
-        
-        # Use the flexible conversation function
+        # Use the flexible conversation function (it creates its own services)
         task = await create_websocket_text_conversation(
             websocket=websocket,
-            llm=llm,
-            system_prompt=system_prompt or "You are a helpful text-based assistant.",
-            activity_tracker=activity_tracker
+            agent_id=agent_id,
+            session_id=session_id,
+            system_prompt=system_prompt or "You are a helpful text-based assistant."
         )
         
         # Update session with pipeline task
@@ -560,6 +537,128 @@ async def get_metrics():
     """Detailed metrics endpoint"""
     return session_manager.get_metrics()
 
+# WebRTC signaling endpoints
+@app.post("/webrtc/offer")
+async def webrtc_offer(
+    offer: WebRTCOffer,
+    request: Request,
+    agent_id: Optional[int] = None,
+    mode: str = "voice",  # "voice" or "text"
+    system_prompt: Optional[str] = None
+):
+    """Handle WebRTC SDP offer and create session"""
+    
+    # Check capacity
+    if not session_manager.can_accept_session():
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Server at capacity", "message": "Please try again later"}
+        )
+    
+    session_id = str(uuid.uuid4())
+    
+    try:
+        # Register session with server's session manager
+        if not session_manager.register_session(
+            session_id, 
+            "webrtc",
+            ip_address=request.client.host if request.client else None
+        ):
+            raise HTTPException(status_code=503, detail="Server at capacity")
+        
+        # Create WebRTC session using the transport manager
+        voice_input = mode in ["voice", "hybrid"]
+        voice_output = mode in ["voice", "hybrid"]
+        
+        session_info = await webrtc_manager.create_session(
+            session_id=session_id,
+            client_sdp=offer.sdp,
+            sdp_type=offer.type,
+            agent_id=agent_id,
+            voice_input=voice_input,
+            voice_output=voice_output,
+            system_prompt=system_prompt
+        )
+        
+        # Update server session manager with the pipeline task
+        server_session = session_manager.get_session(session_id)
+        if server_session and session_info.pipeline_task:
+            server_session.pipeline_task = session_info.pipeline_task
+        
+        logger.info("WebRTC session created", session_id=session_id, mode=mode)
+        
+        return {
+            "session_id": session_id,
+            "status": "offer_received",
+            "message": "SDP offer processed, waiting for connection establishment"
+        }
+        
+    except Exception as e:
+        logger.error("WebRTC offer processing failed", session_id=session_id, error=str(e))
+        await session_manager.end_session(session_id)
+        raise HTTPException(status_code=500, detail=f"Failed to process offer: {str(e)}")
+
+@app.get("/webrtc/answer/{session_id}")
+async def webrtc_answer(session_id: str):
+    """Get WebRTC SDP answer for a session"""
+    
+    try:
+        # Get answer from WebRTC manager
+        answer = await webrtc_manager.get_session_answer(session_id)
+        
+        if not answer:
+            raise HTTPException(
+                status_code=404, 
+                detail="Session not found or answer not ready"
+            )
+        
+        logger.info("WebRTC answer retrieved", session_id=session_id)
+        return answer
+        
+    except Exception as e:
+        logger.error("Failed to get WebRTC answer", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to get answer: {str(e)}")
+
+@app.delete("/webrtc/session/{session_id}")
+async def end_webrtc_session(session_id: str):
+    """End a WebRTC session"""
+    
+    try:
+        # Clean up WebRTC manager session
+        await webrtc_manager.destroy_session(session_id)
+        
+        # Clean up server session manager
+        await session_manager.end_session(session_id)
+        
+        logger.info("WebRTC session ended", session_id=session_id)
+        return {"status": "session_ended", "session_id": session_id}
+        
+    except Exception as e:
+        logger.error("Failed to end WebRTC session", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to end session: {str(e)}")
+
+@app.get("/webrtc/session/{session_id}/status")
+async def get_webrtc_session_status(session_id: str):
+    """Get WebRTC session status"""
+    
+    # Check server session manager
+    server_session = session_manager.get_session(session_id)
+    if not server_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Check WebRTC manager session
+    webrtc_session = webrtc_manager.get_session(session_id)
+    
+    return {
+        "session_id": session_id,
+        "transport_type": server_session.transport_type,
+        "created_at": server_session.created_at,
+        "last_activity": server_session.last_activity,
+        "duration": time.time() - server_session.created_at,
+        "webrtc_connected": webrtc_session is not None,
+        "pipeline_active": server_session.pipeline_task is not None
+    }
+
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -574,6 +673,7 @@ async def root():
             "agent_management",
             "voice_processing",
             "websocket_support",
+            "webrtc_support",
             "pipecat_native_transport",
             "session_capacity_management",
             "activity_tracking"
