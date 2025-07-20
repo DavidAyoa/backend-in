@@ -11,11 +11,12 @@ import structlog
 from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
 from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
 
 from transports.base import BaseTransportManager, TransportConfig, TransportType, SessionInfo
 from bot.flexible_conversation import (
     create_webrtc_voice_conversation, 
-    create_webrtc_text_conversation, 
+    create_webrtc_text_conversation,
     create_webrtc_hybrid_conversation
 )
 
@@ -58,39 +59,61 @@ class WebRTCTransportManager(BaseTransportManager):
                 params=self.config.to_transport_params(),
             )
             
-            # Delegate to appropriate WebRTC conversation function
+            # Get task from appropriate WebRTC conversation function
+            pipeline_task = None
             if voice_input and voice_output:
-                await create_webrtc_voice_conversation(
+                pipeline_task = await create_webrtc_voice_conversation(
                     transport=transport,
                     agent_id=agent_id,
                     session_id=session_id,
                     system_prompt=system_prompt
                 )
             elif not voice_input and not voice_output:
-                await create_webrtc_text_conversation(
+                pipeline_task = await create_webrtc_text_conversation(
                     transport=transport,
                     agent_id=agent_id,
                     session_id=session_id,
                     system_prompt=system_prompt
                 )
             else:
-                await create_webrtc_hybrid_conversation(
+                # For mixed modes, default to voice conversation
+                pipeline_task = await create_webrtc_voice_conversation(
                     transport=transport,
                     agent_id=agent_id,
                     session_id=session_id,
                     system_prompt=system_prompt
                 )
             
-            # Return minimal session info
+            # Store the pipeline task in session info
             session_info = SessionInfo(
                 session_id=session_id,
                 transport_type=TransportType.WEBRTC,
                 config=self.config,
-                transport=transport,  # Add this line
+                transport=transport,
+                pipeline_task=pipeline_task
             )
             
             self.active_sessions[session_id] = session_info
-            logger.info("WebRTC session created", session_id=session_id)
+            
+            # Run the pipeline task immediately with proper error handling
+            if pipeline_task:
+                runner = PipelineRunner(handle_sigint=False)
+                # Start the pipeline in a background task so we can return the session info
+                async def run_with_cleanup():
+                    try:
+                        logger.info("Starting WebRTC pipeline", session_id=session_id)
+                        await runner.run(pipeline_task)
+                    except Exception as e:
+                        logger.error("WebRTC pipeline error", session_id=session_id, error=str(e))
+                        # Clean up session on pipeline error
+                        await self.destroy_session(session_id)
+                    finally:
+                        logger.info("WebRTC pipeline ended", session_id=session_id)
+                
+                import asyncio
+                asyncio.create_task(run_with_cleanup())
+            
+            logger.info("WebRTC session created and pipeline started", session_id=session_id)
             return session_info
             
         except Exception as e:
@@ -129,7 +152,7 @@ class WebRTCTransportManager(BaseTransportManager):
                 return answer
                 
         except Exception as e:
-            self.logger.error(
+            logger.error(
                 "Error getting WebRTC session answer",
                 session_id=session_id,
                 error=str(e)

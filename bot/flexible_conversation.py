@@ -221,13 +221,10 @@ class PipecatConversationBot:
 # Simplified factory functions - Return tasks, don't run them
 async def create_websocket_voice_conversation(
     websocket, 
-    stt,
-    llm,
-    tts,
-    system_prompt: Optional[str] = None,
-    activity_tracker: Optional = None,
     agent_id: Optional[int] = None, 
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    activity_tracker: Optional = None
 ):
     """Create a WebSocket voice-enabled conversation - Returns task, doesn't run it"""
     bot = PipecatConversationBot()
@@ -245,11 +242,10 @@ async def create_websocket_voice_conversation(
 
 async def create_websocket_text_conversation(
     websocket, 
-    llm,
-    system_prompt: Optional[str] = None,
-    activity_tracker: Optional = None,
     agent_id: Optional[int] = None, 
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    activity_tracker: Optional = None
 ):
     """Create a WebSocket text-only conversation - Returns task, doesn't run it"""
     bot = PipecatConversationBot()
@@ -265,29 +261,6 @@ async def create_websocket_text_conversation(
     # Return the task instead of running it
     return await bot.create_pipeline(websocket, bot_config)
 
-async def create_hybrid_conversation(
-    websocket, 
-    agent_id: Optional[int] = None, 
-    session_id: Optional[str] = None,
-    system_prompt: Optional[str] = None
-):
-    """Create a conversation with all modalities enabled"""
-    await websocket.accept()  # Add this line
-    bot = PipecatConversationBot()
-    bot_config = BotConfig(
-        enable_voice_input=True,
-        enable_voice_output=True,
-        enable_interruptions=True,
-        agent_id=agent_id,
-        session_id=session_id,
-        system_prompt=system_prompt
-    )
-    
-    task = await bot.create_pipeline(websocket, bot_config)
-    
-    # Run the pipeline
-    runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
 
 async def create_webrtc_voice_conversation(
     transport: SmallWebRTCTransport,
@@ -335,7 +308,7 @@ async def create_webrtc_hybrid_conversation(
     session_id: Optional[str] = None,
     system_prompt: Optional[str] = None
 ):
-    """Create a WebRTC-enabled conversation with both voice and text"""
+    """Create a WebRTC-enabled conversation with both voice and text - Returns task, doesn't run it"""
     bot = PipecatConversationBot()
     bot_config = BotConfig(
         enable_voice_input=True,
@@ -346,11 +319,8 @@ async def create_webrtc_hybrid_conversation(
         system_prompt=system_prompt
     )
     
-    task = await bot.create_pipeline(transport, bot_config)
-    
-    # Run the pipeline
-    runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
+    # Return the task instead of running it
+    return await bot.create_pipeline(transport, bot_config)
 
 # Export the main functions
 __all__ = [
@@ -360,5 +330,6 @@ __all__ = [
     'create_websocket_voice_conversation',
     'create_websocket_text_conversation',
     'create_webrtc_voice_conversation',
-    'create_webrtc_text_conversation'
+    'create_webrtc_text_conversation',
+    'create_webrtc_hybrid_conversation'
 ]

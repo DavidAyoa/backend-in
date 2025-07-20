@@ -53,7 +53,7 @@ class ServerConfig:
     GOOGLE_STT_ENABLE_INTERIM: bool = os.getenv("GOOGLE_STT_ENABLE_INTERIM", "true").lower() == "true"
     
     # Google TTS settings
-    GOOGLE_TTS_VOICE: str = os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar")
+    GOOGLE_TTS_VOICE: str = os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Laomedeia")
     GOOGLE_TTS_SAMPLE_RATE: int = int(os.getenv("GOOGLE_TTS_SAMPLE_RATE", "24000"))
     
     # Audio settings
