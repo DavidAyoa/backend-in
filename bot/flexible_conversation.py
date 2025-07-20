@@ -220,9 +220,9 @@ class PipecatConversationBot:
         async def on_first_participant_joined(transport, participant):
             slog.info("First participant joined", session_id=bot_config.session_id)
             # Send initial greeting through the pipeline using proper frame
-            await task.queue_frames([
+            await task.queue_frame(
                 LLMMessagesFrame([{"role": "user", "content": "Hello!"}])
-            ])
+            )
         
         @transport.event_handler("on_participant_left")
         async def on_participant_left(transport, participant, reason):
