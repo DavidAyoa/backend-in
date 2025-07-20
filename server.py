@@ -293,13 +293,50 @@ from transports.base import TransportConfig, TransportType
 webrtc_config = TransportConfig(transport_type=TransportType.WEBRTC)
 webrtc_manager = WebRTCTransportManager(webrtc_config)
 
+async def run_webrtc_bot(webrtc_connection, session_id, agent_id, mode):
+    """Run the bot pipeline for WebRTC using proper PipelineRunner"""
+    try:
+        # Create transport with proper TransportParams
+        from pipecat.transports.base_transport import TransportParams
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        
+        transport = SmallWebRTCTransport(
+            webrtc_connection=webrtc_connection,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                vad_analyzer=SileroVADAnalyzer()
+            )
+        )
+        
+        # Create conversation task
+        if mode == "voice":
+            task = await create_webrtc_voice_conversation(
+                transport=transport,
+                agent_id=agent_id,
+                session_id=session_id
+            )
+        else:
+            task = await create_webrtc_text_conversation(
+                transport=transport,
+                agent_id=agent_id,
+                session_id=session_id
+            )
+        
+        # Run the pipeline with PipelineRunner
+        runner = PipelineRunner(handle_sigint=False)
+        await runner.run(task)
+        
+    except Exception as e:
+        logger.error("WebRTC bot error", session_id=session_id, error=str(e))
+
 async def create_pipecat_voice_conversation(
     websocket: WebSocket,
     agent_id: Optional[int] = None,
     session_id: Optional[str] = None,
     system_prompt: Optional[str] = None
 ):
-    """Create a voice conversation using the updated flexible conversation architecture"""
+    """Create a voice conversation using proper PipelineRunner"""
     
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -314,7 +351,7 @@ async def create_pipecat_voice_conversation(
         return
     
     try:
-        # Use the flexible conversation function (it creates its own services)
+        # Use the flexible conversation function
         task = await create_websocket_voice_conversation(
             websocket=websocket,
             agent_id=agent_id,
@@ -327,8 +364,9 @@ async def create_pipecat_voice_conversation(
         if session_info:
             session_info.pipeline_task = task
         
-        # Run the pipeline
-        await task.run()
+        # Run the pipeline with PipelineRunner
+        runner = PipelineRunner(handle_sigint=False)
+        await runner.run(task)
         
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected", session_id=session_id)
@@ -371,8 +409,9 @@ async def create_pipecat_text_conversation(
         if session_info:
             session_info.pipeline_task = task
         
-        # Run the pipeline
-        await task.run()
+        # Run the pipeline with PipelineRunner
+        runner = PipelineRunner(handle_sigint=False)
+        await runner.run(task)
         
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected", session_id=session_id)
@@ -537,7 +576,44 @@ async def get_metrics():
     """Detailed metrics endpoint"""
     return session_manager.get_metrics()
 
-# WebRTC signaling endpoints
+# Add missing WebRTC imports
+from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
+from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection
+
+# Simplified single endpoint for WebRTC connection
+@app.post("/webrtc/connect")
+async def webrtc_connect(
+    offer: WebRTCOffer,
+    agent_id: Optional[int] = None,
+    mode: str = "voice"
+):
+    """Single endpoint for WebRTC connection with immediate answer"""
+    session_id = str(uuid.uuid4())
+    
+    try:
+        # Create WebRTC connection
+        ice_servers = [{"urls": "stun:stun.l.google.com:19302"}]
+        webrtc_connection = SmallWebRTCConnection(ice_servers=ice_servers)
+        
+        await webrtc_connection.initialize(sdp=offer.sdp, type=offer.type)
+        await webrtc_connection.connect()
+        
+        # Get answer immediately
+        answer = webrtc_connection.get_answer()
+        
+        # Create and run bot in background
+        asyncio.create_task(run_webrtc_bot(webrtc_connection, session_id, agent_id, mode))
+        
+        return {
+            "session_id": session_id,
+            "answer": answer
+        }
+        
+    except Exception as e:
+        logger.error("WebRTC connection failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Legacy WebRTC endpoints for compatibility
 @app.post("/webrtc/offer")
 async def webrtc_offer(
     offer: WebRTCOffer,

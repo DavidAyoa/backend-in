@@ -170,7 +170,7 @@ class WebRTCTransportManager(BaseTransportManager):
             logger.info("WebRTC session destroyed", session_id=session_id)
     
     async def get_session_answer(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get the SDP answer for a WebRTC session with proper connection handling"""
+        """Get the SDP answer for a WebRTC session using correct Pipecat API"""
         session_info = self.get_session(session_id)
         if not session_info or not session_info.transport:
             logger.warning("Session not found or no transport", session_id=session_id)
@@ -180,12 +180,7 @@ class WebRTCTransportManager(BaseTransportManager):
             if hasattr(session_info.transport, 'webrtc_connection'):
                 webrtc_connection = session_info.transport.webrtc_connection
                 
-                # Check if connection is active
-                if not webrtc_connection.is_connected():
-                    logger.error("WebRTC connection not established", session_id=session_id)
-                    return None
-                
-                # Get answer from the connection
+                # Get answer using correct Pipecat API
                 answer = webrtc_connection.get_answer()
                 if answer:
                     logger.info("WebRTC answer retrieved successfully", session_id=session_id)
